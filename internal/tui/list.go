@@ -130,12 +130,21 @@ func (l *ListView) skipHeaders(direction int) {
 		l.cursor += direction
 	}
 	if l.cursor < 0 {
+		// find first non-header from start
+		for l.cursor = 0; l.cursor < len(l.items); l.cursor++ {
+			if l.items[l.cursor].Type != "header" {
+				return
+			}
+		}
 		l.cursor = 0
-		l.skipHeaders(1)
-	}
-	if l.cursor >= len(l.items) {
-		l.cursor = len(l.items) - 1
-		l.skipHeaders(-1)
+	} else if l.cursor >= len(l.items) {
+		// find last non-header from end
+		for l.cursor = len(l.items) - 1; l.cursor >= 0; l.cursor-- {
+			if l.items[l.cursor].Type != "header" {
+				return
+			}
+		}
+		l.cursor = 0
 	}
 }
 

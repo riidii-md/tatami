@@ -35,9 +35,12 @@ For `cd` to work in the current terminal, add to `~/.zshrc` or `~/.bashrc`:
 
 ```bash
 tatami() {
-  local output
-  output=$(TATAMI_WRAPPER=1 command tatami "$@")
-  local exit_code=$?
+  local tmp exit_code output
+  tmp=$(mktemp)
+  TATAMI_WRAPPER=1 command tatami "$@" > "$tmp"
+  exit_code=$?
+  output=$(cat "$tmp")
+  rm -f "$tmp"
   if [[ $exit_code -eq 0 && -d "$output" ]]; then
     cd "$output"
   elif [[ -n "$output" ]]; then
