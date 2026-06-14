@@ -4,13 +4,6 @@ Terminal workspace manager with Zellij/Tmux integration. Quickly switch between 
 
 ## Installation
 
-### Homebrew (macOS/Linux)
-
-```bash
-brew tap OleksandrBesan/tap
-brew install tatami
-```
-
 ### Go Install
 
 ```bash
@@ -27,7 +20,17 @@ make install
 
 ### Download Binary
 
-Download from [Releases](https://github.com/OleksandrBesan/tatami/releases).
+Download the archive for your platform from [Releases](https://github.com/OleksandrBesan/tatami/releases), extract it, and move the `tatami` binary somewhere on your `PATH`.
+
+On macOS, direct downloads from GitHub Releases may be blocked by Gatekeeper because the binary is not currently notarized. If you trust the downloaded release, remove the quarantine attribute after extracting:
+
+```bash
+xattr -dr com.apple.quarantine /path/to/tatami
+```
+
+### Homebrew
+
+Homebrew installation is not published yet. Until a `homebrew-tap` repository exists, prefer `go install`, `make install`, or downloading a release binary.
 
 ## Shell Integration
 
