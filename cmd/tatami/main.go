@@ -1,18 +1,23 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
 	"syscall"
+	"text/tabwriter"
+	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"github.com/OleksandrBesan/tatami/internal/agent"
 	"github.com/OleksandrBesan/tatami/internal/config"
 	"github.com/OleksandrBesan/tatami/internal/shell"
 	"github.com/OleksandrBesan/tatami/internal/tui"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 var version = "dev"
@@ -34,6 +39,10 @@ func run() error {
 	paths, err := config.GetPaths()
 	if err != nil {
 		return fmt.Errorf("failed to get config paths: %w", err)
+	}
+
+	if handled, err := handleTopLevelCommand(os.Args[1:], paths, os.Stdout, os.Stderr); handled || err != nil {
+		return err
 	}
 
 	// Initialize workspace store
@@ -80,6 +89,268 @@ func run() error {
 	}
 
 	return handleResult(result)
+}
+
+func handleTopLevelCommand(args []string, paths *config.Paths, out, errOut io.Writer) (bool, error) {
+	if len(args) == 0 {
+		return false, nil
+	}
+	switch args[0] {
+	case "run":
+		if len(args) < 2 {
+			return true, errors.New("usage: tatami run <agent> [args...]")
+		}
+		return true, runTrackedAgent(paths, args[1], args[2:])
+	case "agents":
+		return true, handleAgentsCommand(paths, args[1:], out)
+	case "dashboard", "dash":
+		return true, renderDashboard(paths, out)
+	default:
+		return false, nil
+	}
+}
+
+func handleAgentsCommand(paths *config.Paths, args []string, out io.Writer) error {
+	cmd := "list"
+	if len(args) > 0 {
+		cmd = args[0]
+	}
+	store := agent.NewStore(paths.AgentsFile)
+	switch cmd {
+	case "list", "ls":
+		return printAgents(store, out)
+	case "status":
+		if len(args) < 2 {
+			return errors.New("usage: tatami agents status <id>")
+		}
+		session, err := store.Get(args[1])
+		if err != nil {
+			return err
+		}
+		return printAgentDetail(session, out)
+	case "prune":
+		changed, err := store.PruneStale()
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "marked %d stale agent session(s)\n", changed)
+		return nil
+	case "focus", "open":
+		if len(args) < 2 {
+			return errors.New("usage: tatami agents focus <id>")
+		}
+		session, err := store.Get(args[1])
+		if err != nil {
+			return err
+		}
+		return focusAgent(session, out)
+	default:
+		return fmt.Errorf("unknown agents command %q", cmd)
+	}
+}
+
+func runTrackedAgent(paths *config.Paths, agentName string, args []string) error {
+	binary, err := exec.LookPath(agentName)
+	if err != nil {
+		return fmt.Errorf("%s not found in PATH: %w", agentName, err)
+	}
+	cwd, _ := os.Getwd()
+	store := agent.NewStore(paths.AgentsFile)
+	session := agent.NewSession(agentName, args, cwd, agent.DetectContext())
+	cmd := exec.Command(binary, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = os.Environ()
+	cmd.Dir = cwd
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	session.PID = cmd.Process.Pid
+	if err := store.Create(session); err != nil {
+		_ = cmd.Process.Kill()
+		return err
+	}
+
+	runErr := cmd.Wait()
+	now := time.Now().UTC()
+	session.EndedAt = &now
+	session.Status = agent.StatusExited
+	exitCode := 0
+	if runErr != nil {
+		exitCode = 1
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		}
+	}
+	session.ExitCode = &exitCode
+	if err := store.Update(session); err != nil {
+		return err
+	}
+	if runErr != nil {
+		return runErr
+	}
+	return nil
+}
+
+func printAgents(store *agent.Store, out io.Writer) error {
+	_, _ = store.PruneStale()
+	sessions, err := store.List()
+	if err != nil {
+		return err
+	}
+	if len(sessions) == 0 {
+		fmt.Fprintln(out, "No tracked AI agent sessions yet. Start one with: tatami run claude")
+		return nil
+	}
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "ID\tAGENT\tSTATUS\tMUX\tPANE\tPID\tAGE\tCWD")
+	for _, s := range sessions {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n", shortID(s.ID), s.Agent, s.Status, s.Context.Mux, paneLabel(s), s.PID, age(s.StartedAt), s.Cwd)
+	}
+	return tw.Flush()
+}
+
+func printAgentDetail(s *agent.Session, out io.Writer) error {
+	fmt.Fprintf(out, "ID:      %s\n", s.ID)
+	fmt.Fprintf(out, "Agent:   %s\n", s.Agent)
+	fmt.Fprintf(out, "Status:  %s\n", s.Status)
+	fmt.Fprintf(out, "PID:     %d\n", s.PID)
+	fmt.Fprintf(out, "Mux:     %s\n", s.Context.Mux)
+	fmt.Fprintf(out, "Pane:    %s\n", paneLabel(s))
+	fmt.Fprintf(out, "Cwd:     %s\n", s.Cwd)
+	fmt.Fprintf(out, "Started: %s\n", s.StartedAt.Format(time.RFC3339))
+	if s.EndedAt != nil {
+		fmt.Fprintf(out, "Ended:   %s\n", s.EndedAt.Format(time.RFC3339))
+	}
+	return nil
+}
+
+func renderDashboard(paths *config.Paths, out io.Writer) error {
+	store := agent.NewStore(paths.AgentsFile)
+	_, _ = store.PruneStale()
+	sessions, err := store.List()
+	if err != nil {
+		return err
+	}
+	wsStore, err := workspace.NewStore(paths)
+	if err != nil {
+		return err
+	}
+	workspaces := wsStore.List()
+
+	fmt.Fprintln(out, "Tatami Dashboard")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "┌─ AI Agents ─────────────────────────────┬─ Notifications / Agent Detail ─────────────┐")
+	if len(sessions) == 0 {
+		fmt.Fprintln(out, "│ no tracked agents                        │ start one: tatami run claude               │")
+	} else {
+		for i, s := range sessions {
+			right := ""
+			if i == 0 {
+				right = fmt.Sprintf("Status: %s  Mux: %s  Pane: %s", s.Status, s.Context.Mux, paneLabel(s))
+			}
+			fmt.Fprintf(out, "│ %-39s │ %-43s │\n", fmt.Sprintf("%s %s %s", shortID(s.ID), s.Agent, s.Cwd), right)
+		}
+	}
+	fmt.Fprintln(out, "├─ Workspaces ─────────────────────────────┼─────────────────────────────────────────────┤")
+	if len(workspaces) == 0 {
+		fmt.Fprintln(out, "│ no workspaces                            │                                             │")
+	} else {
+		limit := len(workspaces)
+		if limit > 8 {
+			limit = 8
+		}
+		for i := 0; i < limit; i++ {
+			fmt.Fprintf(out, "│ %-39s │ %-43s │\n", workspaces[i].Name, "")
+		}
+	}
+	fmt.Fprintln(out, "├─ Zellij Sessions ────────────────────────┼─────────────────────────────────────────────┤")
+	fmt.Fprintln(out, "│ use existing Tatami zellij session view  │ exact pane focus depends on zellij support  │")
+	fmt.Fprintln(out, "├─ Tmux Sessions ──────────────────────────┼─────────────────────────────────────────────┤")
+	fmt.Fprintln(out, "│ tatami agents focus <id> can target tmux │ enter/focus action maps here                │")
+	fmt.Fprintln(out, "└──────────────────────────────────────────┴─────────────────────────────────────────────┘")
+	return nil
+}
+
+func focusAgent(s *agent.Session, out io.Writer) error {
+	switch s.Context.Mux {
+	case "tmux":
+		if s.Context.TmuxSession == "" && s.Context.TmuxPane == "" {
+			return errors.New("tmux session has no target metadata")
+		}
+		if s.Context.TmuxSession != "" {
+			if err := exec.Command("tmux", "switch-client", "-t", s.Context.TmuxSession).Run(); err != nil {
+				return err
+			}
+		}
+		if s.Context.TmuxWindow != "" {
+			_ = exec.Command("tmux", "select-window", "-t", s.Context.TmuxWindow).Run()
+		}
+		if s.Context.TmuxPane != "" {
+			_ = exec.Command("tmux", "select-pane", "-t", s.Context.TmuxPane).Run()
+		}
+		fmt.Fprintf(out, "focused tmux agent %s\n", shortID(s.ID))
+		return nil
+	case "zellij":
+		fmt.Fprintf(out, "zellij agent %s is in session=%q pane=%q; attach/focus through zellij for now\n", shortID(s.ID), s.Context.ZellijSession, s.Context.ZellijPaneID)
+		return nil
+	default:
+		return fmt.Errorf("agent %s was not started inside zellij/tmux", shortID(s.ID))
+	}
+}
+
+func paneLabel(s *agent.Session) string {
+	if s.Context.Mux == "zellij" {
+		return s.Context.ZellijPaneID
+	}
+	if s.Context.Mux == "tmux" {
+		parts := []string{}
+		if s.Context.TmuxSession != "" {
+			parts = append(parts, s.Context.TmuxSession)
+		}
+		if s.Context.TmuxWindow != "" {
+			parts = append(parts, s.Context.TmuxWindow)
+		}
+		if s.Context.TmuxPane != "" {
+			parts = append(parts, s.Context.TmuxPane)
+		}
+		return strings.Join(parts, ":")
+	}
+	return ""
+}
+
+func shortID(id string) string {
+	if len(id) <= 18 {
+		return id
+	}
+	return id[:18]
+}
+
+func age(t time.Time) string {
+	d := time.Since(t).Round(time.Second)
+	if d < 0 {
+		d = 0
+	}
+	return d.String()
+}
+
+func isKnownAgentCommand(command string) bool {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return false
+	}
+	if fields[0] == "tatami" && len(fields) >= 3 && fields[1] == "run" {
+		return true
+	}
+	switch fields[0] {
+	case "claude", "codex", "gemini", "opencode", "agy":
+		return true
+	default:
+		return false
+	}
 }
 
 func copyToClipboard(text string) error {
