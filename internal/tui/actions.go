@@ -3,9 +3,9 @@ package tui
 import (
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/OleksandrBesan/tatami/internal/git"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // Action represents a workspace action
@@ -36,10 +36,15 @@ func NewActionView(ws *workspace.Workspace, inZellij, inTmux bool) *ActionView {
 
 	// Check if workspace is a git repo (only for local workspaces)
 	isGitRepo := !ws.IsRemote() && git.IsGitRepo(ws.Path)
+	hasSavedLayout := len(ws.Layout.Panes) > 0 || ws.Layout.MainCmd != ""
+
+	if ws.Layout.Type == workspace.LayoutHerdr && hasSavedLayout {
+		actions = append(actions, ActionWithLayout)
+	}
 
 	if inZellij {
 		// Saved layout first (if available)
-		if ws.Layout.Type == workspace.LayoutZellij && len(ws.Layout.Panes) > 0 {
+		if ws.Layout.Type == workspace.LayoutZellij && hasSavedLayout {
 			actions = append(actions, ActionWithLayout)
 		}
 		// Git worktree option (only for local git repos)
@@ -49,7 +54,7 @@ func NewActionView(ws *workspace.Workspace, inZellij, inTmux bool) *ActionView {
 		actions = append(actions, ActionWithTemplate, ActionNewPane, ActionNewTab, ActionCD)
 	} else if inTmux {
 		// Saved layout first (if available)
-		if ws.Layout.Type == workspace.LayoutTmux && len(ws.Layout.Panes) > 0 {
+		if ws.Layout.Type == workspace.LayoutTmux && hasSavedLayout {
 			actions = append(actions, ActionWithLayout)
 		}
 		// Git worktree option (only for local git repos)
@@ -59,7 +64,7 @@ func NewActionView(ws *workspace.Workspace, inZellij, inTmux bool) *ActionView {
 		actions = append(actions, ActionWithTemplate, ActionNewPane, ActionNewTab, ActionCD)
 	} else {
 		// Outside multiplexer - only CD
-		actions = []Action{ActionCD}
+		actions = append(actions, ActionCD)
 	}
 
 	return &ActionView{

@@ -7,12 +7,12 @@ import (
 	"strings"
 	"syscall"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/OleksandrBesan/tatami/internal/config"
 	"github.com/OleksandrBesan/tatami/internal/shell"
 	"github.com/OleksandrBesan/tatami/internal/tui"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 var version = "dev"
@@ -108,6 +108,7 @@ func handleResult(result *tui.Result) error {
 	ws := result.Workspace
 	zellij := shell.NewZellijRunner()
 	tmux := shell.NewTmuxRunner()
+	herdr := shell.NewHerdrRunner()
 	isRemote := ws.IsRemote()
 
 	switch result.Action {
@@ -192,6 +193,12 @@ func handleResult(result *tui.Result) error {
 		return nil
 
 	case tui.ActionWithLayout:
+		if ws.Layout.Type == workspace.LayoutHerdr {
+			if isRemote {
+				return fmt.Errorf("herdr layout backend is only supported for local workspaces")
+			}
+			return herdr.RunWithLayout(ws)
+		}
 		if isRemote {
 			if zellij.IsInsideSession() && ws.Layout.Type == workspace.LayoutZellij {
 				return zellij.RunWithLayoutSSH(ws)
