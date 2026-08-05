@@ -7,6 +7,7 @@ const (
 	LayoutNone   LayoutType = "none"
 	LayoutZellij LayoutType = "zellij"
 	LayoutTmux   LayoutType = "tmux"
+	LayoutHerdr  LayoutType = "herdr"
 )
 
 // Pane represents a single pane in a layout

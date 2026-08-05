@@ -4,13 +4,6 @@ Terminal workspace manager with Zellij/Tmux integration. Quickly switch between 
 
 ## Installation
 
-### Homebrew (macOS/Linux)
-
-```bash
-brew tap OleksandrBesan/tap
-brew install tatami
-```
-
 ### Go Install
 
 ```bash
@@ -27,7 +20,17 @@ make install
 
 ### Download Binary
 
-Download from [Releases](https://github.com/OleksandrBesan/tatami/releases).
+Download the archive for your platform from [Releases](https://github.com/OleksandrBesan/tatami/releases), extract it, and move the `tatami` binary somewhere on your `PATH`.
+
+On macOS, direct downloads from GitHub Releases may be blocked by Gatekeeper because the binary is not currently notarized. If you trust the downloaded release, remove the quarantine attribute after extracting:
+
+```bash
+xattr -dr com.apple.quarantine /path/to/tatami
+```
+
+### Homebrew
+
+Homebrew installation is not published yet. Until a `homebrew-tap` repository exists, prefer `go install`, `make install`, or downloading a release binary.
 
 ## Shell Integration
 
@@ -35,9 +38,12 @@ For `cd` to work in the current terminal, add to `~/.zshrc` or `~/.bashrc`:
 
 ```bash
 tatami() {
-  local output
-  output=$(TATAMI_WRAPPER=1 command tatami "$@")
-  local exit_code=$?
+  local tmp exit_code output
+  tmp=$(mktemp)
+  TATAMI_WRAPPER=1 command tatami "$@" > "$tmp"
+  exit_code=$?
+  output=$(cat "$tmp")
+  rm -f "$tmp"
   if [[ $exit_code -eq 0 && -d "$output" ]]; then
     cd "$output"
   elif [[ -n "$output" ]]; then
@@ -117,6 +123,12 @@ Open worktrees in new tabs for git-enabled workspaces. When selecting a workspac
    - **plain** - open simple tab
 
 Worktrees are created at `.worktrees/<branch-name>/` inside the repository.
+
+### Worktree Kanban Tasks
+A proposed next step is a per-project Kanban board where each task can create or
+focus a Git worktree, open the matching Tatami pane, and move through
+Todo/Doing/Review/Done as real work progresses. See
+[`docs/worktree-kanban-tasks.md`](docs/worktree-kanban-tasks.md) for the design.
 
 ### Layout Templates
 Apply predefined pane layouts when opening workspaces.
@@ -252,6 +264,17 @@ Workspaces are stored in `~/.config/tatami/workspaces.json`:
         "path": "/home/user/project"
       },
       "layout": { "type": "zellij", "panes": [] }
+    },
+    {
+      "name": "agent-project",
+      "path": "/home/user/agent-project",
+      "layout": {
+        "type": "herdr",
+        "main_cmd": "nvim",
+        "panes": [
+          { "command": "claude", "direction": "right" }
+        ]
+      }
     }
   ]
 }
@@ -273,15 +296,22 @@ Workspaces are stored in `~/.config/tatami/workspaces.json`:
 
 | Field | Description |
 |-------|-------------|
-| `type` | `none`, `zellij`, or `tmux` |
+| `type` | `none`, `zellij`, `tmux`, or `herdr` |
 | `main_cmd` | Command to run in the original (left/top) pane |
 | `panes` | Array of additional panes |
 | `panes[].command` | Command to run (empty = shell) |
 | `panes[].direction` | `right`, `down`, or `stack` (Zellij only) |
 
+### Herdr Layout Backend
+
+Set `layout.type` to `herdr` to let Tatami use Herdr as the runtime for the workspace. Tatami creates a Herdr session named `tatami-<workspace>`, creates the root workspace with the configured `path`, splits panes from the saved layout, starts known AI commands such as `claude`, `codex`, and `gemini` via `herdr agent start`, runs other commands with `herdr pane run`, then attaches to the Herdr session.
+
+This keeps Tatami responsible for selecting the local workspace while Herdr owns the agent panes, status, and control plane.
+
 ## Requirements
 
 - **Zellij** or **Tmux** (for tab/pane features)
+- **Herdr** (for `layout.type: "herdr"`)
 - Works without them for basic `cd` functionality
 
 ## License

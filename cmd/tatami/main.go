@@ -12,6 +12,7 @@ import (
 	"github.com/OleksandrBesan/tatami/internal/tui"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 var version = "dev"
@@ -47,13 +48,30 @@ func run(newTabMode bool) error {
 		return fmt.Errorf("failed to initialize store: %w", err)
 	}
 
+	// Prevent lipgloss from blocking on OSC 11 terminal background color query.
+	// Some terminals don't respond to OSC queries, causing a 5s hang on first render.
+	lipgloss.SetHasDarkBackground(true)
+
 	// Create and run the TUI app
 	appOptions := []tui.AppOption{}
 	if newTabMode {
 		appOptions = append(appOptions, tui.WithNewTabMode())
 	}
 	app := tui.NewApp(store, appOptions...)
-	p := tea.NewProgram(app, tea.WithAltScreen())
+
+	// When running inside the shell wrapper (TATAMI_WRAPPER=1), stdout is redirected
+	// to a temp file to capture the result path. We must attach the TUI to /dev/tty
+	// directly so the UI renders in the terminal regardless of stdout redirection.
+	var opts []tea.ProgramOption
+	opts = append(opts, tea.WithAltScreen())
+	if os.Getenv("TATAMI_WRAPPER") == "1" {
+		tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+		if err == nil {
+			opts = append(opts, tea.WithInput(tty), tea.WithOutput(tty))
+			defer tty.Close()
+		}
+	}
+	p := tea.NewProgram(app, opts...)
 
 	finalModel, err := p.Run()
 	if err != nil {
@@ -168,6 +186,7 @@ func handleResult(result *tui.Result, newTabMode bool) error {
 
 	zellij := shell.NewZellijRunner()
 	tmux := shell.NewTmuxRunner()
+	herdr := shell.NewHerdrRunner()
 	isRemote := ws.IsRemote()
 
 	switch result.Action {
@@ -252,6 +271,12 @@ func handleResult(result *tui.Result, newTabMode bool) error {
 		return nil
 
 	case tui.ActionWithLayout:
+		if ws.Layout.Type == workspace.LayoutHerdr {
+			if isRemote {
+				return fmt.Errorf("herdr layout backend is only supported for local workspaces")
+			}
+			return herdr.RunWithLayout(ws)
+		}
 		if isRemote {
 			if zellij.IsInsideSession() && ws.Layout.Type == workspace.LayoutZellij {
 				return zellij.RunWithLayoutSSH(ws)

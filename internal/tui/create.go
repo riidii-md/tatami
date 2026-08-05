@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/OleksandrBesan/tatami/internal/workspace"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/OleksandrBesan/tatami/internal/workspace"
 )
 
 type createField int
@@ -70,7 +70,7 @@ func NewCreateView() *CreateView {
 		sshKeyInput:     sshKeyInput,
 		folderInput:     folderInput,
 		layoutType:      workspace.LayoutNone,
-		layoutTypes:     []workspace.LayoutType{workspace.LayoutNone, workspace.LayoutZellij, workspace.LayoutTmux},
+		layoutTypes:     []workspace.LayoutType{workspace.LayoutNone, workspace.LayoutZellij, workspace.LayoutTmux, workspace.LayoutHerdr},
 		activeField:     fieldName,
 		editing:         false,
 	}
