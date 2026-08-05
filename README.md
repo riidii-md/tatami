@@ -231,6 +231,17 @@ Workspaces are stored in `~/.config/tatami/workspaces.json`:
         "path": "/home/user/project"
       },
       "layout": { "type": "zellij", "panes": [] }
+    },
+    {
+      "name": "agent-project",
+      "path": "/home/user/agent-project",
+      "layout": {
+        "type": "herdr",
+        "main_cmd": "nvim",
+        "panes": [
+          { "command": "claude", "direction": "right" }
+        ]
+      }
     }
   ]
 }
@@ -252,15 +263,22 @@ Workspaces are stored in `~/.config/tatami/workspaces.json`:
 
 | Field | Description |
 |-------|-------------|
-| `type` | `none`, `zellij`, or `tmux` |
+| `type` | `none`, `zellij`, `tmux`, or `herdr` |
 | `main_cmd` | Command to run in the original (left/top) pane |
 | `panes` | Array of additional panes |
 | `panes[].command` | Command to run (empty = shell) |
 | `panes[].direction` | `right`, `down`, or `stack` (Zellij only) |
 
+### Herdr Layout Backend
+
+Set `layout.type` to `herdr` to let Tatami use Herdr as the runtime for the workspace. Tatami creates a Herdr session named `tatami-<workspace>`, creates the root workspace with the configured `path`, splits panes from the saved layout, starts known AI commands such as `claude`, `codex`, and `gemini` via `herdr agent start`, runs other commands with `herdr pane run`, then attaches to the Herdr session.
+
+This keeps Tatami responsible for selecting the local workspace while Herdr owns the agent panes, status, and control plane.
+
 ## Requirements
 
 - **Zellij** or **Tmux** (for tab/pane features)
+- **Herdr** (for `layout.type: "herdr"`)
 - Works without them for basic `cd` functionality
 
 ## License
