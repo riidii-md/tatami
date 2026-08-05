@@ -65,14 +65,14 @@ The script appends a marked, idempotent block to your `kitty.conf` (default
 
 ```conf
 # >>> tatami kitty integration >>>
-map kitty_mod+t launch --type=tab --cwd=current /abs/path/to/tatami
+map kitty_mod+t launch --type=tab --cwd=current /abs/path/to/tatami --new-tab
 map kitty_mod+shift+t new_tab_with_cwd
-map cmd+t launch --type=tab --cwd=current /abs/path/to/tatami
+map cmd+t launch --type=tab --cwd=current /abs/path/to/tatami --new-tab
 map cmd+shift+t new_tab_with_cwd
 # <<< tatami kitty integration <<<
 ```
 
-- New tab → Tatami: `kitty_mod+t` (and `cmd+t` on macOS).
+- New tab → Tatami: `kitty_mod+t` (and `cmd+t` on macOS). Selecting a workspace immediately replaces Tatami with a shell in that directory.
 - New tab → plain shell: `kitty_mod+shift+t` (and `cmd+shift+t` on macOS).
 
 The absolute path is required because Kitty launches the command without a

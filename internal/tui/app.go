@@ -3,10 +3,10 @@ package tui
 import (
 	"fmt"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/OleksandrBesan/tatami/internal/git"
 	"github.com/OleksandrBesan/tatami/internal/shell"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // View represents the current view state
@@ -33,6 +33,17 @@ type Result struct {
 	SessionName string
 }
 
+// AppOption configures optional chooser behavior.
+type AppOption func(*App)
+
+// WithNewTabMode makes workspace selection return immediately. The caller can
+// then replace Tatami with a shell rooted in the selected workspace.
+func WithNewTabMode() AppOption {
+	return func(a *App) {
+		a.newTabMode = true
+	}
+}
+
 // App is the main Bubbletea model
 type App struct {
 	store              *workspace.Store
@@ -53,17 +64,18 @@ type App struct {
 	width              int
 	height             int
 	err                error
+	newTabMode         bool
 }
 
 // NewApp creates a new App
-func NewApp(store *workspace.Store) *App {
+func NewApp(store *workspace.Store, options ...AppOption) *App {
 	zellij := shell.NewZellijRunner()
 	tmux := shell.NewTmuxRunner()
 
 	listView := NewListView(store)
 	listView.SetInZellij(zellij.IsInsideSession())
 
-	return &App{
+	app := &App{
 		store:        store,
 		zellij:       zellij,
 		tmux:         tmux,
@@ -72,6 +84,10 @@ func NewApp(store *workspace.Store) *App {
 		createView:   NewCreateView(),
 		layoutEditor: NewLayoutEditor(),
 	}
+	for _, option := range options {
+		option(app)
+	}
+	return app
 }
 
 // Result returns the result of the TUI session
@@ -185,6 +201,13 @@ func (a *App) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "folder":
 			a.listView.EnterFolder(item.Name)
 		case "workspace":
+			if a.newTabMode {
+				a.result = &Result{
+					Action:    ActionCD,
+					Workspace: item.Workspace,
+				}
+				return a, tea.Quit
+			}
 			a.actionsView = NewActionView(item.Workspace, a.zellij.IsInsideSession(), a.tmux.IsInsideSession())
 			a.currentView = ViewActions
 		}

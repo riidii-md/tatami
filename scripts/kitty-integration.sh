@@ -52,10 +52,10 @@ $MARKER_BEGIN
 # Open a new tab straight into Tatami. Kitty runs the command without a login
 # shell, so the absolute path is required (regenerate with the setup script if
 # tatami moves). Use the *-shift-t bindings for a plain shell tab.
-map kitty_mod+t launch --type=tab --cwd=current $bin
+map kitty_mod+t launch --type=tab --cwd=current $bin --new-tab
 map kitty_mod+shift+t new_tab_with_cwd
 # macOS: cmd+t / cmd+shift+t are Kitty's built-in tab shortcuts; override them too.
-map cmd+t launch --type=tab --cwd=current $bin
+map cmd+t launch --type=tab --cwd=current $bin --new-tab
 map cmd+shift+t new_tab_with_cwd
 $MARKER_END
 EOF
