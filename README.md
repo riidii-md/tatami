@@ -91,6 +91,12 @@ Open worktrees in new tabs for git-enabled workspaces. When selecting a workspac
 
 Worktrees are created at `.worktrees/<branch-name>/` inside the repository.
 
+### Worktree Kanban Tasks
+A proposed next step is a per-project Kanban board where each task can create or
+focus a Git worktree, open the matching Tatami pane, and move through
+Todo/Doing/Review/Done as real work progresses. See
+[`docs/worktree-kanban-tasks.md`](docs/worktree-kanban-tasks.md) for the design.
+
 ### Layout Templates
 Apply predefined pane layouts when opening workspaces.
 
