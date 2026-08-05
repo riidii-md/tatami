@@ -31,7 +31,7 @@ type ActionView struct {
 }
 
 // NewActionView creates a new action view
-func NewActionView(ws *workspace.Workspace, inZellij, inTmux bool) *ActionView {
+func NewActionView(ws *workspace.Workspace, inZellij, inTmux, inNewTab bool) *ActionView {
 	var actions []Action
 
 	// Check if workspace is a git repo (only for local workspaces)
@@ -62,6 +62,13 @@ func NewActionView(ws *workspace.Workspace, inZellij, inTmux bool) *ActionView {
 			actions = append(actions, ActionWorktree)
 		}
 		actions = append(actions, ActionWithTemplate, ActionNewPane, ActionNewTab, ActionCD)
+	} else if inNewTab {
+		// A dedicated Kitty tab can open a local Git worktree or hand the
+		// current tab over to a shell in the selected workspace.
+		if isGitRepo {
+			actions = append(actions, ActionWorktree)
+		}
+		actions = append(actions, ActionCD)
 	} else {
 		// Outside multiplexer - only CD
 		actions = append(actions, ActionCD)

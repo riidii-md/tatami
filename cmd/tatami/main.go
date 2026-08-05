@@ -18,18 +18,24 @@ import (
 var version = "dev"
 
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
-		fmt.Printf("tatami %s\n", version)
-		return
+	newTabMode := false
+	for _, arg := range os.Args[1:] {
+		switch arg {
+		case "--version", "-v":
+			fmt.Printf("tatami %s\n", version)
+			return
+		case "--new-tab":
+			newTabMode = true
+		}
 	}
 
-	if err := run(); err != nil {
+	if err := run(newTabMode); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
+func run(newTabMode bool) error {
 	// Load config paths
 	paths, err := config.GetPaths()
 	if err != nil {
@@ -47,7 +53,11 @@ func run() error {
 	lipgloss.SetHasDarkBackground(true)
 
 	// Create and run the TUI app
-	app := tui.NewApp(store)
+	appOptions := []tui.AppOption{}
+	if newTabMode {
+		appOptions = append(appOptions, tui.WithNewTabMode())
+	}
+	app := tui.NewApp(store, appOptions...)
 
 	// When running inside the shell wrapper (TATAMI_WRAPPER=1), stdout is redirected
 	// to a temp file to capture the result path. We must attach the TUI to /dev/tty
@@ -79,7 +89,7 @@ func run() error {
 		return nil
 	}
 
-	return handleResult(result)
+	return handleResult(result, newTabMode)
 }
 
 func copyToClipboard(text string) error {
@@ -88,7 +98,92 @@ func copyToClipboard(text string) error {
 	return cmd.Run()
 }
 
-func handleResult(result *tui.Result) error {
+type processSpec struct {
+	path string
+	args []string
+	dir  string
+}
+
+func quoteShellArg(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func newTabProcess(ws *workspace.Workspace, shellPath string, lookPath func(string) (string, error)) (processSpec, error) {
+	if ws.IsRemote() {
+		sshPath, err := lookPath("ssh")
+		if err != nil {
+			return processSpec{}, fmt.Errorf("ssh not found: %w", err)
+		}
+
+		remotePath := ws.Remote.Path
+		if remotePath == "" {
+			remotePath = ws.Path
+		}
+		remoteCommand := "exec ${SHELL:-/bin/sh}"
+		if remotePath != "" {
+			remoteCommand = "cd " + quoteShellArg(remotePath) + " && " + remoteCommand
+		}
+
+		args := []string{sshPath}
+		if ws.Remote.Key != "" {
+			args = append(args, "-i", ws.Remote.Key)
+		}
+		args = append(args, "-t", "--", ws.Remote.Host, remoteCommand)
+		return processSpec{path: sshPath, args: args}, nil
+	}
+
+	if shellPath == "" {
+		shellPath = "/bin/sh"
+	}
+	resolvedShell, err := lookPath(shellPath)
+	if err != nil {
+		return processSpec{}, fmt.Errorf("shell %q not found: %w", shellPath, err)
+	}
+	return processSpec{
+		path: resolvedShell,
+		args: []string{resolvedShell},
+		dir:  ws.Path,
+	}, nil
+}
+
+func openWorkspaceInNewTab(ws *workspace.Workspace) error {
+	process, err := newTabProcess(ws, os.Getenv("SHELL"), exec.LookPath)
+	if err != nil {
+		return err
+	}
+	if process.dir != "" {
+		if err := os.Chdir(process.dir); err != nil {
+			return fmt.Errorf("failed to enter workspace %q: %w", process.dir, err)
+		}
+	}
+	return syscall.Exec(process.path, process.args, os.Environ())
+}
+
+func newTabTarget(result *tui.Result) (*workspace.Workspace, bool) {
+	if result == nil || result.Workspace == nil {
+		return nil, false
+	}
+	if result.Action == tui.ActionCD {
+		return result.Workspace, true
+	}
+	if result.Action != tui.ActionWorktree || result.Worktree == nil || result.Template == nil {
+		return nil, false
+	}
+	if result.Template.MainCmd != "" || len(result.Template.Panes) > 0 {
+		return nil, false
+	}
+
+	target := *result.Workspace
+	target.Name = result.Worktree.Branch
+	if target.Name == "" {
+		target.Name = "worktree"
+	}
+	target.Path = result.Worktree.Path
+	target.Remote = nil
+	return &target, true
+}
+
+func handleResult(result *tui.Result, newTabMode bool) error {
 	// Handle session attachment first (doesn't need workspace)
 	if result.Action == tui.ActionAttachSession {
 		if result.SessionName == "" {
@@ -106,6 +201,15 @@ func handleResult(result *tui.Result) error {
 	}
 
 	ws := result.Workspace
+	if ws == nil {
+		return fmt.Errorf("no workspace selected")
+	}
+	if newTabMode {
+		if target, ok := newTabTarget(result); ok {
+			return openWorkspaceInNewTab(target)
+		}
+	}
+
 	zellij := shell.NewZellijRunner()
 	tmux := shell.NewTmuxRunner()
 	herdr := shell.NewHerdrRunner()

@@ -3,10 +3,10 @@ package tui
 import (
 	"fmt"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/OleksandrBesan/tatami/internal/git"
 	"github.com/OleksandrBesan/tatami/internal/shell"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // View represents the current view state
@@ -33,6 +33,17 @@ type Result struct {
 	SessionName string
 }
 
+// AppOption configures optional chooser behavior.
+type AppOption func(*App)
+
+// WithNewTabMode adapts workspace actions for a dedicated terminal tab. The
+// caller can replace Tatami with a shell rooted in a workspace or worktree.
+func WithNewTabMode() AppOption {
+	return func(a *App) {
+		a.newTabMode = true
+	}
+}
+
 // App is the main Bubbletea model
 type App struct {
 	store              *workspace.Store
@@ -53,17 +64,18 @@ type App struct {
 	width              int
 	height             int
 	err                error
+	newTabMode         bool
 }
 
 // NewApp creates a new App
-func NewApp(store *workspace.Store) *App {
+func NewApp(store *workspace.Store, options ...AppOption) *App {
 	zellij := shell.NewZellijRunner()
 	tmux := shell.NewTmuxRunner()
 
 	listView := NewListView(store)
 	listView.SetInZellij(zellij.IsInsideSession())
 
-	return &App{
+	app := &App{
 		store:        store,
 		zellij:       zellij,
 		tmux:         tmux,
@@ -72,6 +84,10 @@ func NewApp(store *workspace.Store) *App {
 		createView:   NewCreateView(),
 		layoutEditor: NewLayoutEditor(),
 	}
+	for _, option := range options {
+		option(app)
+	}
+	return app
 }
 
 // Result returns the result of the TUI session
@@ -185,7 +201,7 @@ func (a *App) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "folder":
 			a.listView.EnterFolder(item.Name)
 		case "workspace":
-			a.actionsView = NewActionView(item.Workspace, a.zellij.IsInsideSession(), a.tmux.IsInsideSession())
+			a.actionsView = NewActionView(item.Workspace, a.zellij.IsInsideSession(), a.tmux.IsInsideSession(), a.newTabMode)
 			a.currentView = ViewActions
 		}
 		return a, nil
@@ -415,6 +431,15 @@ func (a *App) updateWorktree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Check if a worktree was selected - show worktree actions
 	if wt := a.worktreeView.Selected(); wt != nil {
 		ws := a.actionsView.Workspace()
+		if a.newTabMode {
+			a.result = &Result{
+				Action:    ActionWorktree,
+				Workspace: ws,
+				Worktree:  wt,
+				Template:  &workspace.Template{},
+			}
+			return a, tea.Quit
+		}
 		a.worktreeActionView = NewWorktreeActionView(wt, ws)
 		a.currentView = ViewWorktreeActions
 		return a, nil

@@ -55,6 +55,39 @@ tatami() {
 
 Without the wrapper, `cd` will type the command in Zellij or copy to clipboard.
 
+## Kitty Integration
+
+If you use the [Kitty](https://sw.kovidgoyal.net/kitty/) terminal, you can make
+a new tab open straight into Tatami instead of a plain shell:
+
+```bash
+scripts/kitty-integration.sh          # install / update the keybindings
+scripts/kitty-integration.sh --remove # remove them
+scripts/kitty-integration.sh --print  # preview without writing
+```
+
+The script appends a marked, idempotent block to your `kitty.conf` (default
+`~/.config/kitty/kitty.conf`) and reloads any running Kitty instance:
+
+```conf
+# >>> tatami kitty integration >>>
+map kitty_mod+t launch --type=tab --cwd=current /abs/path/to/tatami --new-tab
+map kitty_mod+shift+t new_tab_with_cwd
+map cmd+t launch --type=tab --cwd=current /abs/path/to/tatami --new-tab
+map cmd+shift+t new_tab_with_cwd
+# <<< tatami kitty integration <<<
+```
+
+- New tab → Tatami: `kitty_mod+t` (and `cmd+t` on macOS). Selecting a workspace opens actions for entering the project or choosing a Git worktree; the resulting shell stays in the current Kitty tab.
+- New tab → plain shell: `kitty_mod+shift+t` (and `cmd+shift+t` on macOS).
+
+The absolute path is required because Kitty launches the command without a
+login shell — re-run the script if `tatami` moves. Override the paths with the
+`KITTY_CONFIG` and `TATAMI_BIN` environment variables.
+
+If you also use Zellij and want to skip its startup tip popup in fresh
+sessions, set `show_startup_tips false` in `~/.config/zellij/config.kdl`.
+
 ## Usage
 
 ```bash
