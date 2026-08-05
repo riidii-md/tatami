@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/OleksandrBesan/tatami/internal/git"
+	"github.com/OleksandrBesan/tatami/internal/tui"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
 )
 
@@ -66,6 +68,27 @@ func TestNewTabProcessStartsRemoteSession(t *testing.T) {
 	}
 	if !reflect.DeepEqual(process.args, wantArgs) {
 		t.Fatalf("process args = %#v; want %#v", process.args, wantArgs)
+	}
+}
+
+func TestNewTabTargetUsesSelectedWorktree(t *testing.T) {
+	ws := &workspace.Workspace{Name: "project", Path: "/tmp/project"}
+	result := &tui.Result{
+		Action:    tui.ActionWorktree,
+		Workspace: ws,
+		Worktree:  &git.Worktree{Path: "/tmp/project-feature", Branch: "feature"},
+		Template:  &workspace.Template{},
+	}
+
+	target, ok := newTabTarget(result)
+	if !ok {
+		t.Fatal("plain worktree result was not recognized as a new-tab target")
+	}
+	if target.Path != "/tmp/project-feature" || target.Name != "feature" {
+		t.Fatalf("new-tab target = %#v; want selected worktree path and branch", target)
+	}
+	if ws.Path != "/tmp/project" {
+		t.Fatalf("newTabTarget mutated source workspace path to %q", ws.Path)
 	}
 }
 

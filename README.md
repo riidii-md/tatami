@@ -78,7 +78,7 @@ map cmd+shift+t new_tab_with_cwd
 # <<< tatami kitty integration <<<
 ```
 
-- New tab → Tatami: `kitty_mod+t` (and `cmd+t` on macOS). Selecting a workspace immediately replaces Tatami with a shell in that directory.
+- New tab → Tatami: `kitty_mod+t` (and `cmd+t` on macOS). Selecting a workspace opens actions for entering the project or choosing a Git worktree; the resulting shell stays in the current Kitty tab.
 - New tab → plain shell: `kitty_mod+shift+t` (and `cmd+shift+t` on macOS).
 
 The absolute path is required because Kitty launches the command without a

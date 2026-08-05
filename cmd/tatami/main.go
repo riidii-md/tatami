@@ -159,6 +159,30 @@ func openWorkspaceInNewTab(ws *workspace.Workspace) error {
 	return syscall.Exec(process.path, process.args, os.Environ())
 }
 
+func newTabTarget(result *tui.Result) (*workspace.Workspace, bool) {
+	if result == nil || result.Workspace == nil {
+		return nil, false
+	}
+	if result.Action == tui.ActionCD {
+		return result.Workspace, true
+	}
+	if result.Action != tui.ActionWorktree || result.Worktree == nil || result.Template == nil {
+		return nil, false
+	}
+	if result.Template.MainCmd != "" || len(result.Template.Panes) > 0 {
+		return nil, false
+	}
+
+	target := *result.Workspace
+	target.Name = result.Worktree.Branch
+	if target.Name == "" {
+		target.Name = "worktree"
+	}
+	target.Path = result.Worktree.Path
+	target.Remote = nil
+	return &target, true
+}
+
 func handleResult(result *tui.Result, newTabMode bool) error {
 	// Handle session attachment first (doesn't need workspace)
 	if result.Action == tui.ActionAttachSession {
@@ -180,8 +204,10 @@ func handleResult(result *tui.Result, newTabMode bool) error {
 	if ws == nil {
 		return fmt.Errorf("no workspace selected")
 	}
-	if newTabMode && result.Action == tui.ActionCD {
-		return openWorkspaceInNewTab(ws)
+	if newTabMode {
+		if target, ok := newTabTarget(result); ok {
+			return openWorkspaceInNewTab(target)
+		}
 	}
 
 	zellij := shell.NewZellijRunner()

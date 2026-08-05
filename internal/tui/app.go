@@ -36,8 +36,8 @@ type Result struct {
 // AppOption configures optional chooser behavior.
 type AppOption func(*App)
 
-// WithNewTabMode makes workspace selection return immediately. The caller can
-// then replace Tatami with a shell rooted in the selected workspace.
+// WithNewTabMode adapts workspace actions for a dedicated terminal tab. The
+// caller can replace Tatami with a shell rooted in a workspace or worktree.
 func WithNewTabMode() AppOption {
 	return func(a *App) {
 		a.newTabMode = true
@@ -201,14 +201,7 @@ func (a *App) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "folder":
 			a.listView.EnterFolder(item.Name)
 		case "workspace":
-			if a.newTabMode {
-				a.result = &Result{
-					Action:    ActionCD,
-					Workspace: item.Workspace,
-				}
-				return a, tea.Quit
-			}
-			a.actionsView = NewActionView(item.Workspace, a.zellij.IsInsideSession(), a.tmux.IsInsideSession())
+			a.actionsView = NewActionView(item.Workspace, a.zellij.IsInsideSession(), a.tmux.IsInsideSession(), a.newTabMode)
 			a.currentView = ViewActions
 		}
 		return a, nil
@@ -438,6 +431,15 @@ func (a *App) updateWorktree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Check if a worktree was selected - show worktree actions
 	if wt := a.worktreeView.Selected(); wt != nil {
 		ws := a.actionsView.Workspace()
+		if a.newTabMode {
+			a.result = &Result{
+				Action:    ActionWorktree,
+				Workspace: ws,
+				Worktree:  wt,
+				Template:  &workspace.Template{},
+			}
+			return a, tea.Quit
+		}
 		a.worktreeActionView = NewWorktreeActionView(wt, ws)
 		a.currentView = ViewWorktreeActions
 		return a, nil
