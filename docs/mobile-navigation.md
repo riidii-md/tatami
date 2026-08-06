@@ -7,6 +7,8 @@ Start it explicitly:
 
 ```bash
 tatami --mobile
+# Short form for a phone keyboard:
+tatami -m
 ```
 
 For one-tap access, set `tatami --mobile` as the Termius host Startup Command or

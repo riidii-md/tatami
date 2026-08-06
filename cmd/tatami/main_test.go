@@ -217,4 +217,9 @@ func TestParseLaunchOptionsEnablesMobileAndNewTabModes(t *testing.T) {
 	if !versionOptions.showVersion {
 		t.Fatal("-v did not enable version output")
 	}
+
+	shortMobileOptions := parseLaunchOptions([]string{"-m"})
+	if !shortMobileOptions.mobileMode {
+		t.Fatal("-m did not enable mobile mode")
+	}
 }

@@ -31,7 +31,7 @@ func parseLaunchOptions(args []string) launchOptions {
 			options.showVersion = true
 		case "--new-tab":
 			options.newTabMode = true
-		case "--mobile":
+		case "--mobile", "-m":
 			options.mobileMode = true
 		}
 	}

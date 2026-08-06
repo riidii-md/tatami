@@ -98,7 +98,7 @@ tatami
 For compact, phone-friendly navigation over SSH:
 
 ```bash
-tatami --mobile
+tatami --mobile # or: tatami -m
 ```
 
 Mobile mode shows numbered choices, keeps `Enter` as confirmation, adds `b` as
