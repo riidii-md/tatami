@@ -431,7 +431,7 @@ func (a *App) updateWorktree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Check if a worktree was selected - show worktree actions
 	if wt := a.worktreeView.Selected(); wt != nil {
 		ws := a.actionsView.Workspace()
-		if a.newTabMode {
+		if a.newTabMode || ws.Layout.Type == workspace.LayoutHerdr {
 			a.result = &Result{
 				Action:    ActionWorktree,
 				Workspace: ws,

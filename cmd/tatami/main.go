@@ -183,6 +183,43 @@ func newTabTarget(result *tui.Result) (*workspace.Workspace, bool) {
 	return &target, true
 }
 
+func herdrTarget(result *tui.Result) (*workspace.Workspace, bool) {
+	if result == nil || result.Workspace == nil || result.Workspace.Layout.Type != workspace.LayoutHerdr {
+		return nil, false
+	}
+
+	target := *result.Workspace
+	switch result.Action {
+	case tui.ActionWithLayout, tui.ActionCD:
+		return &target, true
+
+	case tui.ActionWithTemplate:
+		if result.Template == nil {
+			return nil, false
+		}
+		target.Layout = workspace.Layout{
+			Type:    workspace.LayoutHerdr,
+			MainCmd: result.Template.MainCmd,
+			Panes:   append([]workspace.Pane(nil), result.Template.Panes...),
+		}
+		return &target, true
+
+	case tui.ActionWorktree:
+		if result.Worktree == nil {
+			return nil, false
+		}
+		target.Name = result.Worktree.Branch
+		if target.Name == "" {
+			target.Name = "worktree"
+		}
+		target.Path = result.Worktree.Path
+		target.Remote = nil
+		return &target, true
+	}
+
+	return nil, false
+}
+
 func handleResult(result *tui.Result, newTabMode bool) error {
 	// Handle session attachment first (doesn't need workspace)
 	if result.Action == tui.ActionAttachSession {
@@ -204,6 +241,16 @@ func handleResult(result *tui.Result, newTabMode bool) error {
 	if ws == nil {
 		return fmt.Errorf("no workspace selected")
 	}
+	if ws.Layout.Type == workspace.LayoutHerdr {
+		if ws.IsRemote() {
+			return fmt.Errorf("herdr layout backend is only supported for local workspaces")
+		}
+		target, ok := herdrTarget(result)
+		if !ok {
+			return fmt.Errorf("action is not supported by the herdr backend")
+		}
+		return shell.NewHerdrRunner().RunWithLayout(target)
+	}
 	if newTabMode {
 		if target, ok := newTabTarget(result); ok {
 			return openWorkspaceInNewTab(target)
@@ -212,7 +259,6 @@ func handleResult(result *tui.Result, newTabMode bool) error {
 
 	zellij := shell.NewZellijRunner()
 	tmux := shell.NewTmuxRunner()
-	herdr := shell.NewHerdrRunner()
 	isRemote := ws.IsRemote()
 
 	switch result.Action {
@@ -297,12 +343,6 @@ func handleResult(result *tui.Result, newTabMode bool) error {
 		return nil
 
 	case tui.ActionWithLayout:
-		if ws.Layout.Type == workspace.LayoutHerdr {
-			if isRemote {
-				return fmt.Errorf("herdr layout backend is only supported for local workspaces")
-			}
-			return herdr.RunWithLayout(ws)
-		}
 		if isRemote {
 			if zellij.IsInsideSession() && ws.Layout.Type == workspace.LayoutZellij {
 				return zellij.RunWithLayoutSSH(ws)

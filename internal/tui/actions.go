@@ -38,11 +38,14 @@ func NewActionView(ws *workspace.Workspace, inZellij, inTmux, inNewTab bool) *Ac
 	isGitRepo := !ws.IsRemote() && git.IsGitRepo(ws.Path)
 	hasSavedLayout := len(ws.Layout.Panes) > 0 || ws.Layout.MainCmd != ""
 
-	if ws.Layout.Type == workspace.LayoutHerdr && hasSavedLayout {
+	if ws.Layout.Type == workspace.LayoutHerdr {
+		// Herdr is the workspace backend, so every open path must stay on Herdr.
 		actions = append(actions, ActionWithLayout)
-	}
-
-	if inZellij {
+		if isGitRepo {
+			actions = append(actions, ActionWorktree)
+		}
+		actions = append(actions, ActionWithTemplate)
+	} else if inZellij {
 		// Saved layout first (if available)
 		if ws.Layout.Type == workspace.LayoutZellij && hasSavedLayout {
 			actions = append(actions, ActionWithLayout)
@@ -150,6 +153,9 @@ func (a *ActionView) View() string {
 		}
 
 		label := actionLabels[action]
+		if action == ActionWithLayout && a.workspace.Layout.Type == workspace.LayoutHerdr {
+			label = "open in herdr"
+		}
 		b.WriteString(cursor)
 		b.WriteString(style.Render(label))
 		b.WriteString("\n")

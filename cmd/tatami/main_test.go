@@ -92,6 +92,63 @@ func TestNewTabTargetUsesSelectedWorktree(t *testing.T) {
 	}
 }
 
+func TestHerdrTargetUsesSelectedWorktreeAndSavedLayout(t *testing.T) {
+	ws := &workspace.Workspace{
+		Name: "project",
+		Path: "/tmp/project",
+		Layout: workspace.Layout{
+			Type:    workspace.LayoutHerdr,
+			MainCmd: "claude",
+		},
+	}
+	result := &tui.Result{
+		Action:    tui.ActionWorktree,
+		Workspace: ws,
+		Worktree:  &git.Worktree{Path: "/tmp/project-feature", Branch: "feature"},
+		Template:  &workspace.Template{},
+	}
+
+	target, ok := herdrTarget(result)
+	if !ok {
+		t.Fatal("Herdr worktree result was not recognized")
+	}
+	if target.Path != "/tmp/project-feature" || target.Name != "feature" {
+		t.Fatalf("Herdr target = %#v; want selected worktree path and branch", target)
+	}
+	if target.Layout.Type != workspace.LayoutHerdr || target.Layout.MainCmd != "claude" {
+		t.Fatalf("Herdr target layout = %#v; want saved Herdr layout", target.Layout)
+	}
+}
+
+func TestHerdrTargetUsesSelectedTemplate(t *testing.T) {
+	ws := &workspace.Workspace{
+		Name:   "project",
+		Path:   "/tmp/project",
+		Layout: workspace.Layout{Type: workspace.LayoutHerdr},
+	}
+	template := &workspace.Template{
+		Name:    "agents",
+		MainCmd: "nvim",
+		Panes:   []workspace.Pane{{Command: "claude", Direction: "right"}},
+	}
+	result := &tui.Result{
+		Action:    tui.ActionWithTemplate,
+		Workspace: ws,
+		Template:  template,
+	}
+
+	target, ok := herdrTarget(result)
+	if !ok {
+		t.Fatal("Herdr template result was not recognized")
+	}
+	if target.Layout.Type != workspace.LayoutHerdr || target.Layout.MainCmd != "nvim" {
+		t.Fatalf("Herdr template layout = %#v; want selected template on Herdr", target.Layout)
+	}
+	if !reflect.DeepEqual(target.Layout.Panes, template.Panes) {
+		t.Fatalf("Herdr template panes = %#v; want %#v", target.Layout.Panes, template.Panes)
+	}
+}
+
 func TestKittyConfigLaunchesNewTabMode(t *testing.T) {
 	cmd := exec.Command("bash", "../../scripts/kitty-integration.sh", "--print")
 	cmd.Env = append(os.Environ(), "TATAMI_BIN=/tmp/tatami")

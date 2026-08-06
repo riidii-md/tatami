@@ -7,20 +7,23 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/OleksandrBesan/tatami/internal/workspace"
 )
 
 // HerdrRunner executes Herdr commands as a Tatami layout backend.
 type HerdrRunner struct {
-	exec herdrExecutor
+	exec        herdrExecutor
+	startServer herdrServerStarter
 }
 
 type herdrExecutor func(args ...string) ([]byte, error)
+type herdrServerStarter func(session string) error
 
 // NewHerdrRunner creates a new Herdr runner.
 func NewHerdrRunner() *HerdrRunner {
-	return NewHerdrRunnerWithExecutor(func(args ...string) ([]byte, error) {
+	return NewHerdrRunnerWithRuntime(func(args ...string) ([]byte, error) {
 		cmd := exec.Command("herdr", args...)
 		cmd.Stdin = os.Stdin
 		cmd.Stderr = os.Stderr
@@ -29,12 +32,26 @@ func NewHerdrRunner() *HerdrRunner {
 			return nil, cmd.Run()
 		}
 		return cmd.Output()
+	}, func(session string) error {
+		cmd := exec.Command("herdr", "--session", session, "server")
+		if err := cmd.Start(); err != nil {
+			return fmt.Errorf("failed to start herdr session %s: %w", session, err)
+		}
+		if err := cmd.Process.Release(); err != nil {
+			return fmt.Errorf("failed to release herdr session %s: %w", session, err)
+		}
+		return nil
 	})
 }
 
 // NewHerdrRunnerWithExecutor creates a Herdr runner with an injected executor for tests.
 func NewHerdrRunnerWithExecutor(exec herdrExecutor) *HerdrRunner {
-	return &HerdrRunner{exec: exec}
+	return NewHerdrRunnerWithRuntime(exec, func(string) error { return nil })
+}
+
+// NewHerdrRunnerWithRuntime creates a Herdr runner with injected command and server runtimes.
+func NewHerdrRunnerWithRuntime(exec herdrExecutor, startServer herdrServerStarter) *HerdrRunner {
+	return &HerdrRunner{exec: exec, startServer: startServer}
 }
 
 // IsAvailable checks if Herdr is installed.
@@ -46,6 +63,9 @@ func (h *HerdrRunner) IsAvailable() bool {
 // RunWithLayout creates a Herdr workspace from a Tatami layout, then attaches to it.
 func (h *HerdrRunner) RunWithLayout(ws *workspace.Workspace) error {
 	session := SessionName(ws.Name)
+	if err := h.ensureSession(session); err != nil {
+		return err
+	}
 	rootPane, err := h.createWorkspace(session, ws)
 	if err != nil {
 		return err
@@ -69,6 +89,38 @@ func (h *HerdrRunner) RunWithLayout(ws *workspace.Workspace) error {
 
 	_, err = h.exec("--session", session)
 	return err
+}
+
+func (h *HerdrRunner) ensureSession(session string) error {
+	if h.sessionRunning(session) {
+		return nil
+	}
+	if h.startServer == nil {
+		return fmt.Errorf("cannot start herdr session %s", session)
+	}
+	if err := h.startServer(session); err != nil {
+		return err
+	}
+
+	const attempts = 100
+	for attempt := 0; attempt < attempts; attempt++ {
+		if h.sessionRunning(session) {
+			return nil
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return fmt.Errorf("herdr session %s did not become ready", session)
+}
+
+func (h *HerdrRunner) sessionRunning(session string) bool {
+	out, err := h.exec("--session", session, "status", "server", "--json")
+	if err != nil {
+		return false
+	}
+	var status struct {
+		Running bool `json:"running"`
+	}
+	return json.Unmarshal(out, &status) == nil && status.Running
 }
 
 // SessionName returns the default Herdr session name for a Tatami workspace.

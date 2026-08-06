@@ -70,6 +70,65 @@ func TestNewTabModeOpensSelectedWorktreeDirectly(t *testing.T) {
 	}
 }
 
+func TestHerdrWorkspaceActionsStayOnHerdrBackend(t *testing.T) {
+	ws := &workspace.Workspace{
+		Name: "agents",
+		Path: newGitRepo(t),
+		Layout: workspace.Layout{
+			Type:    workspace.LayoutHerdr,
+			MainCmd: "claude",
+		},
+	}
+
+	view := NewActionView(ws, false, false, true)
+	wantActions := []Action{ActionWithLayout, ActionWorktree, ActionWithTemplate}
+	if !reflect.DeepEqual(view.actions, wantActions) {
+		t.Fatalf("Herdr actions = %#v; want %#v", view.actions, wantActions)
+	}
+}
+
+func TestHerdrWorkspaceWithoutCommandsCanStillOpenInHerdr(t *testing.T) {
+	ws := &workspace.Workspace{
+		Name:   "agents",
+		Path:   t.TempDir(),
+		Layout: workspace.Layout{Type: workspace.LayoutHerdr},
+	}
+
+	view := NewActionView(ws, false, false, false)
+	wantActions := []Action{ActionWithLayout, ActionWithTemplate}
+	if !reflect.DeepEqual(view.actions, wantActions) {
+		t.Fatalf("empty Herdr actions = %#v; want %#v", view.actions, wantActions)
+	}
+}
+
+func TestHerdrWorktreeSelectionDoesNotOpenMultiplexerActions(t *testing.T) {
+	ws := &workspace.Workspace{
+		Name:   "agents",
+		Path:   newGitRepo(t),
+		Layout: workspace.Layout{Type: workspace.LayoutHerdr, MainCmd: "claude"},
+	}
+	store := newTestStore(t, ws)
+	app := NewApp(store)
+	app.actionsView = NewActionView(ws, false, false, false)
+	app.worktreeView = &WorktreeView{
+		selected: &git.Worktree{Path: "/tmp/agents-feature", Branch: "feature"},
+	}
+	app.currentView = ViewWorktree
+
+	model, cmd := app.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated := model.(*App)
+
+	if updated.result == nil || updated.result.Action != ActionWorktree {
+		t.Fatalf("Herdr worktree result = %#v; want ActionWorktree", updated.result)
+	}
+	if updated.currentView == ViewWorktreeActions {
+		t.Fatal("Herdr worktree selection opened the multiplexer action menu")
+	}
+	if cmd == nil {
+		t.Fatal("Herdr worktree selection did not quit the chooser")
+	}
+}
+
 func TestDefaultModeStillShowsWorkspaceActions(t *testing.T) {
 	store := newTestStore(t, &workspace.Workspace{
 		Name: "project",
