@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"strings"
 
 	"github.com/OleksandrBesan/tatami/internal/git"
 	"github.com/OleksandrBesan/tatami/internal/shell"
@@ -23,6 +25,8 @@ const (
 	ViewWorktreeActions
 	ViewSessions
 	ViewHerdrOpenMode
+	ViewHerdrSessionName
+	ViewHerdrSessionPicker
 )
 
 // Result represents the outcome of the TUI session
@@ -33,9 +37,12 @@ type Result struct {
 	Worktree    *git.Worktree
 	SessionName string
 	HerdrMode   HerdrOpenMode
+	// HerdrSessionName is the explicitly selected destination for HerdrOpenExisting.
+	HerdrSessionName string
 }
 
 type herdrSessionLister func() ([]shell.HerdrSession, error)
+type herdrSessionStopper func(string) error
 
 // AppOption configures optional chooser behavior.
 type AppOption func(*App)
@@ -48,37 +55,48 @@ func WithNewTabMode() AppOption {
 	}
 }
 
-// WithHerdrSessionLister injects the Herdr session source used by the home page.
+// WithHerdrSessionLister injects the Herdr session source used by the home page and session picker.
 func WithHerdrSessionLister(lister func() ([]shell.HerdrSession, error)) AppOption {
 	return func(a *App) {
 		a.herdrSessionLister = lister
 	}
 }
 
+// WithHerdrSessionStopper injects the Herdr session stop operation.
+func WithHerdrSessionStopper(stopper func(string) error) AppOption {
+	return func(a *App) {
+		a.herdrSessionStopper = stopper
+	}
+}
+
 // App is the main Bubbletea model
 type App struct {
-	store              *workspace.Store
-	zellij             *shell.ZellijRunner
-	tmux               *shell.TmuxRunner
-	currentView        View
-	previousView       View
-	listView           *ListView
-	createView         *CreateView
-	actionsView        *ActionView
-	layoutEditor       *LayoutEditor
-	templateView       *TemplateView
-	folderInput        *FolderInput
-	worktreeView       *WorktreeView
-	worktreeActionView *WorktreeActionView
-	sessionView        *SessionView
-	herdrOpenModeView  *HerdrOpenModeView
-	pendingHerdrResult *Result
-	result             *Result
-	width              int
-	height             int
-	err                error
-	newTabMode         bool
-	herdrSessionLister herdrSessionLister
+	store                  *workspace.Store
+	zellij                 *shell.ZellijRunner
+	tmux                   *shell.TmuxRunner
+	currentView            View
+	previousView           View
+	listView               *ListView
+	createView             *CreateView
+	actionsView            *ActionView
+	layoutEditor           *LayoutEditor
+	templateView           *TemplateView
+	folderInput            *FolderInput
+	worktreeView           *WorktreeView
+	worktreeActionView     *WorktreeActionView
+	sessionView            *SessionView
+	herdrOpenModeView      *HerdrOpenModeView
+	herdrSessionNameView   *HerdrSessionNameView
+	herdrSessionPickerView *HerdrSessionPickerView
+	pendingHerdrResult     *Result
+	herdrOpenBackView      View
+	result                 *Result
+	width                  int
+	height                 int
+	err                    error
+	newTabMode             bool
+	herdrSessionLister     herdrSessionLister
+	herdrSessionStopper    herdrSessionStopper
 }
 
 // NewApp creates a new App
@@ -86,14 +104,16 @@ func NewApp(store *workspace.Store, options ...AppOption) *App {
 	zellij := shell.NewZellijRunner()
 	tmux := shell.NewTmuxRunner()
 
+	herdrRunner := shell.NewHerdrRunner()
 	app := &App{
-		store:              store,
-		zellij:             zellij,
-		tmux:               tmux,
-		currentView:        ViewList,
-		createView:         NewCreateView(),
-		layoutEditor:       NewLayoutEditor(),
-		herdrSessionLister: shell.ListHerdrSessions,
+		store:               store,
+		zellij:              zellij,
+		tmux:                tmux,
+		currentView:         ViewList,
+		createView:          NewCreateView(),
+		layoutEditor:        NewLayoutEditor(),
+		herdrSessionLister:  shell.ListHerdrSessions,
+		herdrSessionStopper: herdrRunner.StopSession,
 	}
 	for _, option := range options {
 		option(app)
@@ -150,6 +170,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a.updateSessions(msg)
 		case ViewHerdrOpenMode:
 			return a.updateHerdrOpenMode(msg)
+		case ViewHerdrSessionName:
+			return a.updateHerdrSessionName(msg)
+		case ViewHerdrSessionPicker:
+			return a.updateHerdrSessionPicker(msg)
 		}
 	}
 
@@ -248,6 +272,17 @@ func (a *App) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if err := a.store.Delete(item.Workspace.Name); err == nil {
 				a.listView.Refresh()
 			}
+		}
+		return a, nil
+
+	case "x":
+		item := a.listView.Selected()
+		if item != nil && item.Type == "herdr_session" && item.Herdr != nil && item.Herdr.Running {
+			if err := a.herdrSessionStopper(item.Name); err != nil {
+				a.err = err
+				return a, nil
+			}
+			a.listView.Refresh()
 		}
 		return a, nil
 
@@ -362,10 +397,15 @@ func (a *App) updateActions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
-		a.result = &Result{
+		result := &Result{
 			Action:    action,
 			Workspace: ws,
 		}
+		if ws.Layout.Type == workspace.LayoutHerdr {
+			a.beginHerdrOpen(result, ViewActions)
+			return a, nil
+		}
+		a.result = result
 		return a, tea.Quit
 
 	default:
@@ -413,22 +453,32 @@ func (a *App) updateTemplates(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if a.previousView == ViewWorktreeActions {
 			ws := a.worktreeActionView.Workspace()
 			wt := a.worktreeActionView.Worktree()
-			a.result = &Result{
+			result := &Result{
 				Action:    ActionWorktree,
 				Workspace: ws,
 				Worktree:  wt,
 				Template:  tmpl,
 			}
+			if ws.Layout.Type == workspace.LayoutHerdr {
+				a.beginHerdrOpen(result, ViewTemplates)
+				return a, nil
+			}
+			a.result = result
 			return a, tea.Quit
 		}
 
 		// If came from actions view, execute with template
 		ws := a.actionsView.Workspace()
-		a.result = &Result{
+		result := &Result{
 			Action:    ActionWithTemplate,
 			Workspace: ws,
 			Template:  tmpl,
 		}
+		if ws.Layout.Type == workspace.LayoutHerdr {
+			a.beginHerdrOpen(result, ViewTemplates)
+			return a, nil
+		}
+		a.result = result
 		return a, tea.Quit
 
 	default:
@@ -453,14 +503,12 @@ func (a *App) updateWorktree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if wt := a.worktreeView.Selected(); wt != nil {
 		ws := a.actionsView.Workspace()
 		if ws.Layout.Type == workspace.LayoutHerdr {
-			a.pendingHerdrResult = &Result{
+			a.beginHerdrOpen(&Result{
 				Action:    ActionWorktree,
 				Workspace: ws,
 				Worktree:  wt,
 				Template:  &workspace.Template{},
-			}
-			a.herdrOpenModeView = NewHerdrOpenModeView()
-			a.currentView = ViewHerdrOpenMode
+			}, ViewWorktree)
 			return a, nil
 		}
 		if a.newTabMode {
@@ -480,24 +528,108 @@ func (a *App) updateWorktree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a, cmd
 }
 
+func (a *App) beginHerdrOpen(result *Result, backView View) {
+	a.pendingHerdrResult = result
+	a.herdrOpenBackView = backView
+	a.herdrOpenModeView = NewHerdrOpenModeView()
+	a.currentView = ViewHerdrOpenMode
+}
+
 func (a *App) updateHerdrOpenMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "q":
-		ws := a.actionsView.Workspace()
-		a.worktreeView = NewWorktreeView(ws.Path)
+		if a.herdrOpenBackView == ViewWorktree && a.actionsView != nil {
+			a.worktreeView = NewWorktreeView(a.actionsView.Workspace().Path)
+		}
 		a.pendingHerdrResult = nil
-		a.currentView = ViewWorktree
+		a.currentView = a.herdrOpenBackView
 		return a, nil
 	case "enter":
 		if a.pendingHerdrResult == nil {
 			a.err = fmt.Errorf("no pending Herdr workspace")
 			return a, nil
 		}
-		a.pendingHerdrResult.HerdrMode = a.herdrOpenModeView.Selected()
+		mode := a.herdrOpenModeView.Selected()
+		a.pendingHerdrResult.HerdrMode = mode
+		if mode == HerdrOpenExisting {
+			sessions, err := a.herdrSessionLister()
+			currentSession := ""
+			if os.Getenv("HERDR_ENV") == "1" {
+				currentSession = strings.TrimSpace(os.Getenv("HERDR_SESSION"))
+			}
+			a.herdrSessionPickerView = NewHerdrSessionPickerView(sessions, currentSession, err)
+			a.currentView = ViewHerdrSessionPicker
+			return a, nil
+		}
+		a.herdrSessionNameView = NewHerdrSessionNameView(defaultHerdrSessionName(a.pendingHerdrResult))
+		a.currentView = ViewHerdrSessionName
+		return a, nil
+	default:
+		return a, a.herdrOpenModeView.Update(msg)
+	}
+}
+
+func defaultHerdrSessionName(result *Result) string {
+	if result == nil {
+		return ""
+	}
+	name := "workspace"
+	if result.Workspace != nil && result.Workspace.Name != "" {
+		name = result.Workspace.Name
+	}
+	if result.Worktree != nil {
+		if result.Worktree.Branch != "" {
+			name = result.Worktree.Branch
+		} else {
+			name = "worktree"
+		}
+	}
+	return shell.SessionName(name)
+}
+
+func (a *App) updateHerdrSessionName(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		a.currentView = ViewHerdrOpenMode
+		return a, nil
+	case "enter":
+		if a.pendingHerdrResult == nil {
+			a.err = fmt.Errorf("no pending Herdr workspace")
+			return a, nil
+		}
+		name := a.herdrSessionNameView.Value()
+		if name == "" {
+			return a, nil
+		}
+		a.pendingHerdrResult.HerdrMode = HerdrOpenDedicated
+		a.pendingHerdrResult.HerdrSessionName = name
 		a.result = a.pendingHerdrResult
 		return a, tea.Quit
 	default:
-		return a, a.herdrOpenModeView.Update(msg)
+		return a, a.herdrSessionNameView.Update(msg)
+	}
+}
+
+func (a *App) updateHerdrSessionPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		a.currentView = ViewHerdrOpenMode
+		return a, nil
+	case "enter":
+		if a.pendingHerdrResult == nil {
+			a.err = fmt.Errorf("no pending Herdr workspace")
+			return a, nil
+		}
+		session := a.herdrSessionPickerView.Selected()
+		if session == "" {
+			return a, nil
+		}
+		a.pendingHerdrResult.HerdrMode = HerdrOpenExisting
+		a.pendingHerdrResult.HerdrSessionName = session
+		a.result = a.pendingHerdrResult
+		return a, tea.Quit
+	default:
+		return a, a.herdrSessionPickerView.Update(msg)
 	}
 }
 
@@ -600,6 +732,10 @@ func (a *App) View() string {
 		return a.sessionView.View()
 	case ViewHerdrOpenMode:
 		return a.herdrOpenModeView.View()
+	case ViewHerdrSessionName:
+		return a.herdrSessionNameView.View()
+	case ViewHerdrSessionPicker:
+		return a.herdrSessionPickerView.View()
 	default:
 		return ""
 	}

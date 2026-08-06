@@ -82,6 +82,22 @@ func TestHerdrRunWithLayoutStartsSessionCreatesWorkspaceAndAttaches(t *testing.T
 	}
 }
 
+func TestHerdrStopSessionUsesNamedSessionCommand(t *testing.T) {
+	var commands [][]string
+	runner := NewHerdrRunnerWithExecutor(func(args ...string) ([]byte, error) {
+		commands = append(commands, append([]string(nil), args...))
+		return nil, nil
+	})
+
+	if err := runner.StopSession("team-session"); err != nil {
+		t.Fatalf("StopSession returned error: %v", err)
+	}
+	want := [][]string{{"session", "stop", "team-session"}}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("commands = %#v; want %#v", commands, want)
+	}
+}
+
 func TestHerdrRunWithLayoutReusesRunningSession(t *testing.T) {
 	var started bool
 	var commands [][]string

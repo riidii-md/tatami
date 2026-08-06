@@ -421,6 +421,8 @@ func (l *ListView) View() string {
 	var help string
 	if l.filtering {
 		help = "[enter]confirm  [esc]cancel"
+	} else if selected := l.Selected(); selected != nil && selected.Type == "herdr_session" {
+		help = "[enter]open  [x]stop  [q]uit"
 	} else if l.currentFolder != "" {
 		help = "[h/←]back  [n]ew  [e]dit  [d]elete  [*]star  [q]uit"
 	} else if l.inZellij {

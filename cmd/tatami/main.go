@@ -221,11 +221,11 @@ func herdrTarget(result *tui.Result) (*workspace.Workspace, bool) {
 }
 
 func herdrSessionName(result *tui.Result, target *workspace.Workspace) string {
-	if result != nil && result.HerdrMode == tui.HerdrOpenShared && result.Workspace != nil {
-		if os.Getenv("HERDR_ENV") == "1" && strings.TrimSpace(os.Getenv("HERDR_SESSION")) != "" {
-			return os.Getenv("HERDR_SESSION")
-		}
-		return shell.SessionName(result.Workspace.Name)
+	if result != nil && result.HerdrMode == tui.HerdrOpenExisting {
+		return strings.TrimSpace(result.HerdrSessionName)
+	}
+	if result != nil && strings.TrimSpace(result.HerdrSessionName) != "" {
+		return strings.TrimSpace(result.HerdrSessionName)
 	}
 	return shell.SessionName(target.Name)
 }
@@ -265,7 +265,11 @@ func handleResult(result *tui.Result, newTabMode bool) error {
 		if !ok {
 			return fmt.Errorf("action is not supported by the herdr backend")
 		}
-		return shell.NewHerdrRunner().RunWithLayoutInSession(target, herdrSessionName(result, target))
+		session := herdrSessionName(result, target)
+		if session == "" {
+			return fmt.Errorf("no Herdr session selected")
+		}
+		return shell.NewHerdrRunner().RunWithLayoutInSession(target, session)
 	}
 	if newTabMode {
 		if target, ok := newTabTarget(result); ok {

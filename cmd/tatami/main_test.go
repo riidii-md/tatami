@@ -120,30 +120,37 @@ func TestHerdrTargetUsesSelectedWorktreeAndSavedLayout(t *testing.T) {
 	}
 }
 
-func TestHerdrSessionNameUsesDedicatedOrSharedMode(t *testing.T) {
+func TestHerdrSessionNameUsesDedicatedOrExplicitExistingMode(t *testing.T) {
 	parent := &workspace.Workspace{Name: "project", Path: "/tmp/project", Layout: workspace.Layout{Type: workspace.LayoutHerdr}}
 	target := &workspace.Workspace{Name: "feature", Path: "/tmp/project-feature", Layout: workspace.Layout{Type: workspace.LayoutHerdr}}
 
-	dedicated := &tui.Result{Workspace: parent, HerdrMode: tui.HerdrOpenDedicated}
-	if got := herdrSessionName(dedicated, target); got != "tatami-feature" {
-		t.Fatalf("dedicated session = %q; want tatami-feature", got)
+	dedicated := &tui.Result{Workspace: parent, HerdrMode: tui.HerdrOpenDedicated, HerdrSessionName: "feature-review"}
+	if got := herdrSessionName(dedicated, target); got != "feature-review" {
+		t.Fatalf("dedicated session = %q; want feature-review", got)
 	}
 
-	shared := &tui.Result{Workspace: parent, HerdrMode: tui.HerdrOpenShared}
-	if got := herdrSessionName(shared, target); got != "tatami-project" {
-		t.Fatalf("shared session = %q; want tatami-project", got)
+	existing := &tui.Result{Workspace: parent, HerdrMode: tui.HerdrOpenExisting, HerdrSessionName: "team-session"}
+	if got := herdrSessionName(existing, target); got != "team-session" {
+		t.Fatalf("existing session = %q; want team-session", got)
 	}
 }
 
-func TestHerdrSharedModeUsesCurrentHerdrSession(t *testing.T) {
-	t.Setenv("HERDR_ENV", "1")
-	t.Setenv("HERDR_SESSION", "team-session")
+func TestHerdrDedicatedModeFallsBackToGeneratedSessionName(t *testing.T) {
+	target := &workspace.Workspace{Name: "feature", Layout: workspace.Layout{Type: workspace.LayoutHerdr}}
+	result := &tui.Result{HerdrMode: tui.HerdrOpenDedicated}
+
+	if got := herdrSessionName(result, target); got != "tatami-feature" {
+		t.Fatalf("generated dedicated session = %q; want tatami-feature", got)
+	}
+}
+
+func TestHerdrExistingModeRequiresSelectedSession(t *testing.T) {
 	parent := &workspace.Workspace{Name: "project", Layout: workspace.Layout{Type: workspace.LayoutHerdr}}
 	target := &workspace.Workspace{Name: "feature", Layout: workspace.Layout{Type: workspace.LayoutHerdr}}
-	result := &tui.Result{Workspace: parent, HerdrMode: tui.HerdrOpenShared}
+	result := &tui.Result{Workspace: parent, HerdrMode: tui.HerdrOpenExisting}
 
-	if got := herdrSessionName(result, target); got != "team-session" {
-		t.Fatalf("shared in-Herdr session = %q; want team-session", got)
+	if got := herdrSessionName(result, target); got != "" {
+		t.Fatalf("existing session without selection = %q; want empty", got)
 	}
 }
 

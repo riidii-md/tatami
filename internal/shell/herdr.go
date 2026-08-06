@@ -127,6 +127,17 @@ func (h *HerdrRunner) AttachSession(session string) error {
 	return err
 }
 
+// StopSession stops a running named Herdr session.
+func (h *HerdrRunner) StopSession(session string) error {
+	if strings.TrimSpace(session) == "" {
+		return fmt.Errorf("herdr session name is required")
+	}
+	if _, err := h.exec("session", "stop", session); err != nil {
+		return fmt.Errorf("failed to stop herdr session %s: %w", session, err)
+	}
+	return nil
+}
+
 // ListHerdrSessions lists all named Herdr sessions, including stopped sessions.
 func ListHerdrSessions() ([]HerdrSession, error) {
 	if _, err := exec.LookPath("herdr"); err != nil {
