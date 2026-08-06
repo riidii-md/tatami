@@ -120,6 +120,21 @@ func TestHerdrTargetUsesSelectedWorktreeAndSavedLayout(t *testing.T) {
 	}
 }
 
+func TestHerdrSessionNameUsesDedicatedOrSharedMode(t *testing.T) {
+	parent := &workspace.Workspace{Name: "project", Path: "/tmp/project", Layout: workspace.Layout{Type: workspace.LayoutHerdr}}
+	target := &workspace.Workspace{Name: "feature", Path: "/tmp/project-feature", Layout: workspace.Layout{Type: workspace.LayoutHerdr}}
+
+	dedicated := &tui.Result{Workspace: parent, HerdrMode: tui.HerdrOpenDedicated}
+	if got := herdrSessionName(dedicated, target); got != "tatami-feature" {
+		t.Fatalf("dedicated session = %q; want tatami-feature", got)
+	}
+
+	shared := &tui.Result{Workspace: parent, HerdrMode: tui.HerdrOpenShared}
+	if got := herdrSessionName(shared, target); got != "tatami-project" {
+		t.Fatalf("shared session = %q; want tatami-project", got)
+	}
+}
+
 func TestHerdrTargetUsesSelectedTemplate(t *testing.T) {
 	ws := &workspace.Workspace{
 		Name:   "project",

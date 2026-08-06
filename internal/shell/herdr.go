@@ -22,6 +22,13 @@ type HerdrRunner struct {
 type herdrExecutor func(args ...string) ([]byte, error)
 type herdrServerStarter func(session string) error
 
+// HerdrSession is a named Herdr session known to the local Herdr installation.
+type HerdrSession struct {
+	Name    string
+	Running bool
+	Default bool
+}
+
 // NewHerdrRunner creates a new Herdr runner.
 func NewHerdrRunner() *HerdrRunner {
 	return NewHerdrRunnerWithRuntime(func(args ...string) ([]byte, error) {
@@ -63,7 +70,14 @@ func (h *HerdrRunner) IsAvailable() bool {
 
 // RunWithLayout creates a Herdr workspace from a Tatami layout, then attaches to it.
 func (h *HerdrRunner) RunWithLayout(ws *workspace.Workspace) error {
-	session := SessionName(ws.Name)
+	return h.RunWithLayoutInSession(ws, SessionName(ws.Name))
+}
+
+// RunWithLayoutInSession creates or focuses a workspace in the selected Herdr session, then attaches.
+func (h *HerdrRunner) RunWithLayoutInSession(ws *workspace.Workspace, session string) error {
+	if strings.TrimSpace(session) == "" {
+		return fmt.Errorf("herdr session name is required")
+	}
 	if err := h.ensureSession(session); err != nil {
 		return err
 	}
@@ -101,6 +115,52 @@ func (h *HerdrRunner) RunWithLayout(ws *workspace.Workspace) error {
 
 	_, err = h.exec("--session", session)
 	return err
+}
+
+// AttachSession attaches to a named Herdr session, starting it when necessary.
+func (h *HerdrRunner) AttachSession(session string) error {
+	if strings.TrimSpace(session) == "" {
+		return fmt.Errorf("herdr session name is required")
+	}
+	_, err := h.exec("--session", session)
+	return err
+}
+
+// ListHerdrSessions lists all named Herdr sessions, including stopped sessions.
+func ListHerdrSessions() ([]HerdrSession, error) {
+	if _, err := exec.LookPath("herdr"); err != nil {
+		return nil, nil
+	}
+	out, err := exec.Command("herdr", "session", "list", "--json").Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list herdr sessions: %w", err)
+	}
+	return parseHerdrSessions(out)
+}
+
+func parseHerdrSessions(data []byte) ([]HerdrSession, error) {
+	var response struct {
+		Sessions []struct {
+			Name    string `json:"name"`
+			Running bool   `json:"running"`
+			Default bool   `json:"default"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		return nil, fmt.Errorf("failed to parse herdr sessions: %w", err)
+	}
+	sessions := make([]HerdrSession, 0, len(response.Sessions))
+	for _, session := range response.Sessions {
+		if session.Name == "" {
+			continue
+		}
+		sessions = append(sessions, HerdrSession{
+			Name:    session.Name,
+			Running: session.Running,
+			Default: session.Default,
+		})
+	}
+	return sessions, nil
 }
 
 func (h *HerdrRunner) ensureSession(session string) error {
@@ -154,10 +214,9 @@ func (h *HerdrRunner) existingWorkspace(session string, ws *workspace.Workspace)
 
 	foundLabel := false
 	for _, candidate := range response.Result.Workspaces {
-		if candidate.Label != ws.Name {
-			continue
+		if candidate.Label == ws.Name {
+			foundLabel = true
 		}
-		foundLabel = true
 		paneOut, err := h.exec("--session", session, "pane", "list", "--workspace", candidate.ID)
 		if err != nil {
 			return "", fmt.Errorf("failed to list panes for herdr workspace %s: %w", candidate.ID, err)

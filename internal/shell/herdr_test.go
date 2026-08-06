@@ -147,6 +147,107 @@ func TestHerdrRunWithLayoutRejectsExistingTargetAtDifferentPath(t *testing.T) {
 	}
 }
 
+func TestHerdrRunWithLayoutReusesWorkspaceByCwdWhenLabelDiffers(t *testing.T) {
+	var commands [][]string
+	runner := NewHerdrRunnerWithRuntime(func(args ...string) ([]byte, error) {
+		commands = append(commands, append([]string(nil), args...))
+		switch len(commands) {
+		case 1:
+			return []byte(`{"running":true}`), nil
+		case 2:
+			return []byte(`{"result":{"workspaces":[{"workspace_id":"w1","label":"project"}]}}`), nil
+		case 3:
+			return []byte(`{"result":{"panes":[{"pane_id":"w1:p1","cwd":"/tmp/project"}]}}`), nil
+		default:
+			return nil, nil
+		}
+	}, func(string) error {
+		t.Fatal("running Herdr session was started again")
+		return nil
+	})
+
+	ws := &workspace.Workspace{Name: "main", Path: "/tmp/project"}
+	if err := runner.RunWithLayoutInSession(ws, "tatami-project"); err != nil {
+		t.Fatalf("RunWithLayoutInSession returned error: %v", err)
+	}
+	want := [][]string{
+		{"--session", "tatami-project", "status", "server", "--json"},
+		{"--session", "tatami-project", "workspace", "list"},
+		{"--session", "tatami-project", "pane", "list", "--workspace", "w1"},
+		{"--session", "tatami-project", "workspace", "focus", "w1"},
+		{"--session", "tatami-project"},
+	}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("commands mismatch\ngot:  %#v\nwant: %#v", commands, want)
+	}
+}
+
+func TestHerdrRunWithLayoutInSessionUsesProjectSession(t *testing.T) {
+	var commands [][]string
+	runner := NewHerdrRunnerWithRuntime(func(args ...string) ([]byte, error) {
+		commands = append(commands, append([]string(nil), args...))
+		switch len(commands) {
+		case 1:
+			return []byte(`{"running":true}`), nil
+		case 2:
+			return []byte(`{"result":{"workspaces":[]}}`), nil
+		case 3:
+			return []byte(`{"result":{"root_pane":{"pane_id":"w1:p1"}}}`), nil
+		default:
+			return nil, nil
+		}
+	}, func(string) error {
+		t.Fatal("running Herdr session was started again")
+		return nil
+	})
+
+	ws := &workspace.Workspace{Name: "feature", Path: "/tmp/project-feature"}
+	if err := runner.RunWithLayoutInSession(ws, "tatami-project"); err != nil {
+		t.Fatalf("RunWithLayoutInSession returned error: %v", err)
+	}
+
+	want := [][]string{
+		{"--session", "tatami-project", "status", "server", "--json"},
+		{"--session", "tatami-project", "workspace", "list"},
+		{"--session", "tatami-project", "workspace", "create", "--cwd", "/tmp/project-feature", "--label", "feature", "--focus"},
+		{"--session", "tatami-project"},
+	}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("commands mismatch\ngot:  %#v\nwant: %#v", commands, want)
+	}
+}
+
+func TestHerdrAttachSession(t *testing.T) {
+	var commands [][]string
+	runner := NewHerdrRunnerWithRuntime(func(args ...string) ([]byte, error) {
+		commands = append(commands, append([]string(nil), args...))
+		return nil, nil
+	}, nil)
+
+	if err := runner.AttachSession("tatami-project"); err != nil {
+		t.Fatalf("AttachSession returned error: %v", err)
+	}
+	if want := [][]string{{"--session", "tatami-project"}}; !reflect.DeepEqual(commands, want) {
+		t.Fatalf("commands = %#v; want %#v", commands, want)
+	}
+}
+
+func TestParseHerdrSessions(t *testing.T) {
+	input := []byte(`{"sessions":[{"default":true,"name":"default","running":true,"session_dir":"/tmp/default","socket_path":"/tmp/default.sock"},{"default":false,"name":"tatami-project","running":false,"session_dir":"/tmp/project","socket_path":"/tmp/project.sock"}]}`)
+
+	sessions, err := parseHerdrSessions(input)
+	if err != nil {
+		t.Fatalf("parseHerdrSessions returned error: %v", err)
+	}
+	want := []HerdrSession{
+		{Name: "default", Running: true, Default: true},
+		{Name: "tatami-project", Running: false},
+	}
+	if !reflect.DeepEqual(sessions, want) {
+		t.Fatalf("sessions = %#v; want %#v", sessions, want)
+	}
+}
+
 func TestHerdrLayoutTypeIsPersistedAsHerdr(t *testing.T) {
 	ws := workspace.NewWorkspace("agents", "/tmp/agents")
 	ws.Layout.Type = workspace.LayoutHerdr

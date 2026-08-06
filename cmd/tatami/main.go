@@ -220,6 +220,13 @@ func herdrTarget(result *tui.Result) (*workspace.Workspace, bool) {
 	return nil, false
 }
 
+func herdrSessionName(result *tui.Result, target *workspace.Workspace) string {
+	if result != nil && result.HerdrMode == tui.HerdrOpenShared && result.Workspace != nil {
+		return shell.SessionName(result.Workspace.Name)
+	}
+	return shell.SessionName(target.Name)
+}
+
 func handleResult(result *tui.Result, newTabMode bool) error {
 	// Handle session attachment first (doesn't need workspace)
 	if result.Action == tui.ActionAttachSession {
@@ -236,6 +243,12 @@ func handleResult(result *tui.Result, newTabMode bool) error {
 		args := shell.AttachSessionCmd(result.SessionName)
 		return syscall.Exec(zellijPath, args, os.Environ())
 	}
+	if result.Action == tui.ActionAttachHerdrSession {
+		if result.SessionName == "" {
+			return fmt.Errorf("no Herdr session selected")
+		}
+		return shell.NewHerdrRunner().AttachSession(result.SessionName)
+	}
 
 	ws := result.Workspace
 	if ws == nil {
@@ -249,7 +262,7 @@ func handleResult(result *tui.Result, newTabMode bool) error {
 		if !ok {
 			return fmt.Errorf("action is not supported by the herdr backend")
 		}
-		return shell.NewHerdrRunner().RunWithLayout(target)
+		return shell.NewHerdrRunner().RunWithLayoutInSession(target, herdrSessionName(result, target))
 	}
 	if newTabMode {
 		if target, ok := newTabTarget(result); ok {

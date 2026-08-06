@@ -5,17 +5,19 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/OleksandrBesan/tatami/internal/shell"
+	"github.com/OleksandrBesan/tatami/internal/workspace"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/OleksandrBesan/tatami/internal/workspace"
 )
 
-// ListItem represents an item in the list (workspace or folder)
+// ListItem represents an item on the Tatami home list.
 type ListItem struct {
 	Type      string // "workspace", "folder", "header"
 	Name      string
 	Workspace *workspace.Workspace
+	Herdr     *shell.HerdrSession
 }
 
 // ListView displays the list of workspaces
@@ -29,10 +31,16 @@ type ListView struct {
 	inZellij      bool
 	width         int
 	height        int
+	herdrSessions herdrSessionLister
 }
 
 // NewListView creates a new list view
 func NewListView(store *workspace.Store) *ListView {
+	return NewListViewWithHerdrSessions(store, shell.ListHerdrSessions)
+}
+
+// NewListViewWithHerdrSessions creates a list view with an injected Herdr session source.
+func NewListViewWithHerdrSessions(store *workspace.Store, lister herdrSessionLister) *ListView {
 	ti := textinput.New()
 	ti.Placeholder = "Filter..."
 	ti.CharLimit = 50
@@ -43,6 +51,7 @@ func NewListView(store *workspace.Store) *ListView {
 		currentFolder: "",
 		filter:        ti,
 		filtering:     false,
+		herdrSessions: lister,
 	}
 	lv.refreshItems()
 	return lv
@@ -75,6 +84,19 @@ func (l *ListView) refreshItems() {
 			for _, ws := range quickAccess {
 				wsCopy := ws
 				l.items = append(l.items, ListItem{Type: "workspace", Name: ws.Name, Workspace: &wsCopy})
+			}
+		}
+
+		// Herdr exposes the authoritative list, including stopped sessions that
+		// can be restarted by attaching to them.
+		if l.herdrSessions != nil {
+			sessions, err := l.herdrSessions()
+			if err == nil && len(sessions) > 0 {
+				l.items = append(l.items, ListItem{Type: "header", Name: "Herdr Sessions"})
+				for _, session := range sessions {
+					sessionCopy := session
+					l.items = append(l.items, ListItem{Type: "herdr_session", Name: session.Name, Herdr: &sessionCopy})
+				}
 			}
 		}
 
@@ -369,6 +391,22 @@ func (l *ListView) View() string {
 
 				line := fmt.Sprintf("%s%s%-20s %s", cursor, star, name, path)
 				b.WriteString(line + "\n")
+
+			case "herdr_session":
+				cursor := "  "
+				style := normalStyle
+				if i == l.cursor {
+					cursor = "> "
+					style = selectedStyle
+				}
+				status := "○"
+				statusText := "stopped"
+				if item.Herdr != nil && item.Herdr.Running {
+					status = "●"
+					statusText = "running"
+				}
+				name := style.Render(item.Name)
+				b.WriteString(fmt.Sprintf("%s%s %-20s %s\n", cursor, status, name, mutedStyle.Render(statusText)))
 			}
 		}
 

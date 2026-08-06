@@ -8,6 +8,7 @@ import (
 
 	"github.com/OleksandrBesan/tatami/internal/config"
 	"github.com/OleksandrBesan/tatami/internal/git"
+	"github.com/OleksandrBesan/tatami/internal/shell"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -20,7 +21,7 @@ func TestNewTabModeShowsWorkspaceActions(t *testing.T) {
 		Name: "project",
 		Path: repoPath,
 	})
-	app := NewApp(store, WithNewTabMode())
+	app := NewApp(store, WithNewTabMode(), withoutHerdrSessions())
 
 	model, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	updated := model.(*App)
@@ -43,7 +44,7 @@ func TestNewTabModeShowsWorkspaceActions(t *testing.T) {
 func TestNewTabModeOpensSelectedWorktreeDirectly(t *testing.T) {
 	ws := &workspace.Workspace{Name: "project", Path: newGitRepo(t)}
 	store := newTestStore(t, ws)
-	app := NewApp(store, WithNewTabMode())
+	app := NewApp(store, WithNewTabMode(), withoutHerdrSessions())
 	app.actionsView = NewActionView(ws, false, false, true)
 	app.worktreeView = &WorktreeView{
 		selected: &git.Worktree{Path: "/tmp/project-feature", Branch: "feature"},
@@ -101,14 +102,14 @@ func TestHerdrWorkspaceWithoutCommandsCanStillOpenInHerdr(t *testing.T) {
 	}
 }
 
-func TestHerdrWorktreeSelectionDoesNotOpenMultiplexerActions(t *testing.T) {
+func TestHerdrWorktreeSelectionOffersSessionMode(t *testing.T) {
 	ws := &workspace.Workspace{
 		Name:   "agents",
 		Path:   newGitRepo(t),
 		Layout: workspace.Layout{Type: workspace.LayoutHerdr, MainCmd: "claude"},
 	}
 	store := newTestStore(t, ws)
-	app := NewApp(store)
+	app := NewApp(store, withoutHerdrSessions())
 	app.actionsView = NewActionView(ws, false, false, false)
 	app.worktreeView = &WorktreeView{
 		selected: &git.Worktree{Path: "/tmp/agents-feature", Branch: "feature"},
@@ -118,14 +119,82 @@ func TestHerdrWorktreeSelectionDoesNotOpenMultiplexerActions(t *testing.T) {
 	model, cmd := app.Update(tea.KeyMsg{Type: tea.KeyDown})
 	updated := model.(*App)
 
-	if updated.result == nil || updated.result.Action != ActionWorktree {
-		t.Fatalf("Herdr worktree result = %#v; want ActionWorktree", updated.result)
+	if updated.currentView != ViewHerdrOpenMode {
+		t.Fatalf("Herdr worktree selection opened view %v; want ViewHerdrOpenMode", updated.currentView)
 	}
-	if updated.currentView == ViewWorktreeActions {
-		t.Fatal("Herdr worktree selection opened the multiplexer action menu")
+	if updated.result != nil {
+		t.Fatalf("Herdr worktree selection produced result before choosing session mode: %#v", updated.result)
+	}
+	if cmd != nil {
+		t.Fatalf("Herdr worktree selection unexpectedly quit before choosing session mode")
+	}
+
+	model, cmd = updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated = model.(*App)
+	if updated.result == nil || updated.result.Action != ActionWorktree {
+		t.Fatalf("dedicated Herdr result = %#v; want ActionWorktree", updated.result)
+	}
+	if updated.result.HerdrMode != HerdrOpenDedicated {
+		t.Fatalf("Herdr mode = %v; want HerdrOpenDedicated", updated.result.HerdrMode)
 	}
 	if cmd == nil {
-		t.Fatal("Herdr worktree selection did not quit the chooser")
+		t.Fatal("dedicated Herdr selection did not quit")
+	}
+}
+
+func TestHerdrWorktreeCanOpenInSharedProjectSession(t *testing.T) {
+	ws := &workspace.Workspace{
+		Name:   "agents",
+		Path:   newGitRepo(t),
+		Layout: workspace.Layout{Type: workspace.LayoutHerdr, MainCmd: "claude"},
+	}
+	app := NewApp(newTestStore(t, ws), withoutHerdrSessions())
+	app.actionsView = NewActionView(ws, false, false, false)
+	app.worktreeView = &WorktreeView{
+		selected: &git.Worktree{Path: "/tmp/agents-feature", Branch: "feature"},
+	}
+	app.currentView = ViewWorktree
+
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated := model.(*App)
+	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated = model.(*App)
+	model, cmd := updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated = model.(*App)
+
+	if updated.result == nil || updated.result.HerdrMode != HerdrOpenShared {
+		t.Fatalf("shared Herdr result = %#v; want HerdrOpenShared", updated.result)
+	}
+	if updated.result.Worktree == nil || updated.result.Worktree.Path != "/tmp/agents-feature" {
+		t.Fatalf("shared Herdr worktree = %#v", updated.result.Worktree)
+	}
+	if cmd == nil {
+		t.Fatal("shared Herdr selection did not quit")
+	}
+}
+
+func TestHomePageHerdrSessionCanBeOpened(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "project", Path: "/tmp/project"})
+	app := NewApp(store, WithHerdrSessionLister(func() ([]shell.HerdrSession, error) {
+		return []shell.HerdrSession{{Name: "tatami-project", Running: true}}, nil
+	}))
+	for i, item := range app.listView.items {
+		if item.Type == "herdr_session" {
+			app.listView.cursor = i
+			break
+		}
+	}
+
+	model, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated := model.(*App)
+	if updated.result == nil || updated.result.Action != ActionAttachHerdrSession {
+		t.Fatalf("session result = %#v; want ActionAttachHerdrSession", updated.result)
+	}
+	if updated.result.SessionName != "tatami-project" {
+		t.Fatalf("session name = %q; want tatami-project", updated.result.SessionName)
+	}
+	if cmd == nil {
+		t.Fatal("Herdr session selection did not quit")
 	}
 }
 
@@ -134,7 +203,7 @@ func TestDefaultModeStillShowsWorkspaceActions(t *testing.T) {
 		Name: "project",
 		Path: "/tmp/project",
 	})
-	app := NewApp(store)
+	app := NewApp(store, withoutHerdrSessions())
 
 	model, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	updated := model.(*App)
@@ -165,6 +234,12 @@ func newTestStore(t *testing.T, ws *workspace.Workspace) *workspace.Store {
 		t.Fatalf("create workspace: %v", err)
 	}
 	return store
+}
+
+func withoutHerdrSessions() AppOption {
+	return WithHerdrSessionLister(func() ([]shell.HerdrSession, error) {
+		return nil, nil
+	})
 }
 
 func newGitRepo(t *testing.T) string {

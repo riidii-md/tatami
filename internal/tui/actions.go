@@ -19,6 +19,7 @@ const (
 	ActionWithTemplate
 	ActionWorktree
 	ActionAttachSession
+	ActionAttachHerdrSession
 )
 
 // ActionView displays the action menu
