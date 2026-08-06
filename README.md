@@ -71,9 +71,9 @@ The script appends a marked, idempotent block to your `kitty.conf` (default
 
 ```conf
 # >>> tatami kitty integration >>>
-map kitty_mod+t launch --type=tab --cwd=current /abs/path/to/tatami --new-tab
+map kitty_mod+t launch --type=tab --cwd=current /bin/zsh -lic "exec '/abs/path/to/tatami' --new-tab"
 map kitty_mod+shift+t new_tab_with_cwd
-map cmd+t launch --type=tab --cwd=current /abs/path/to/tatami --new-tab
+map cmd+t launch --type=tab --cwd=current /bin/zsh -lic "exec '/abs/path/to/tatami' --new-tab"
 map cmd+shift+t new_tab_with_cwd
 # <<< tatami kitty integration <<<
 ```
@@ -81,9 +81,10 @@ map cmd+shift+t new_tab_with_cwd
 - New tab → Tatami: `kitty_mod+t` (and `cmd+t` on macOS). Selecting a workspace opens actions for entering the project or choosing a Git worktree; the resulting shell stays in the current Kitty tab.
 - New tab → plain shell: `kitty_mod+shift+t` (and `cmd+shift+t` on macOS).
 
-The absolute path is required because Kitty launches the command without a
-login shell — re-run the script if `tatami` moves. Override the paths with the
-`KITTY_CONFIG` and `TATAMI_BIN` environment variables.
+The integration launches Tatami through your interactive login shell so it sees
+the same `PATH` as a normal terminal, including user-installed tools such as
+Herdr in `~/.local/bin`. Re-run the script if `tatami` moves. Override the paths
+with the `KITTY_CONFIG` and `TATAMI_BIN` environment variables.
 
 If you also use Zellij and want to skip its startup tip popup in fresh
 sessions, set `show_startup_tips false` in `~/.config/zellij/config.kdl`.
@@ -101,6 +102,8 @@ Organize workspaces into folders. Navigate into folders with `Enter` or `l`, go 
 
 ### Quick Access
 Star workspaces with `*` or `s` to pin them to the "Quick Access" section at the root level for fast access.
+
+The home page groups folders and unfiled saved workspaces together as **Tatami Projects**. A Tatami workspace is the saved project definition: its name, path, optional folder, quick-access flag, and launch layout. **Herdr Sessions** are shown separately because they are live or persisted runtime sessions, not project definitions.
 
 ### Remote Workspaces
 Connect to remote servers via SSH. Opens an SSH session directly to the remote host.
