@@ -185,15 +185,15 @@ func TestHerdrTargetUsesSelectedTemplate(t *testing.T) {
 
 func TestKittyConfigLaunchesNewTabMode(t *testing.T) {
 	cmd := exec.Command("bash", "../../scripts/kitty-integration.sh", "--print")
-	cmd.Env = append(os.Environ(), "TATAMI_BIN=/tmp/tatami")
+	cmd.Env = append(os.Environ(), "TATAMI_BIN=/tmp/tatami", "SHELL=/bin/zsh")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("print Kitty config: %v\n%s", err, output)
 	}
 
 	for _, binding := range []string{
-		"map kitty_mod+t launch --type=tab --cwd=current /tmp/tatami --new-tab",
-		"map cmd+t launch --type=tab --cwd=current /tmp/tatami --new-tab",
+		`map kitty_mod+t launch --type=tab --cwd=current /bin/zsh -lic "exec '/tmp/tatami' --new-tab"`,
+		`map cmd+t launch --type=tab --cwd=current /bin/zsh -lic "exec '/tmp/tatami' --new-tab"`,
 	} {
 		if !strings.Contains(string(output), binding) {
 			t.Errorf("Kitty config missing %q:\n%s", binding, output)

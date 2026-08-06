@@ -87,8 +87,22 @@ func (l *ListView) refreshItems() {
 			}
 		}
 
-		// Herdr exposes the authoritative list, including stopped sessions that
-		// can be restarted by attaching to them.
+		// Tatami projects include both folders and projects saved directly at root.
+		subfolders := l.store.ListSubfolders("")
+		sort.Strings(subfolders)
+		rootWs := l.store.ListRootWorkspaces()
+		if len(subfolders) > 0 || len(rootWs) > 0 {
+			l.items = append(l.items, ListItem{Type: "header", Name: "Tatami Projects"})
+			for _, f := range subfolders {
+				l.items = append(l.items, ListItem{Type: "folder", Name: f})
+			}
+			for _, ws := range rootWs {
+				wsCopy := ws
+				l.items = append(l.items, ListItem{Type: "workspace", Name: ws.Name, Workspace: &wsCopy})
+			}
+		}
+
+		// Herdr is a separate runtime/session group after Tatami's saved projects.
 		if l.herdrSessions != nil {
 			sessions, err := l.herdrSessions()
 			if err == nil && len(sessions) > 0 {
@@ -97,26 +111,6 @@ func (l *ListView) refreshItems() {
 					sessionCopy := session
 					l.items = append(l.items, ListItem{Type: "herdr_session", Name: session.Name, Herdr: &sessionCopy})
 				}
-			}
-		}
-
-		// Folders section
-		subfolders := l.store.ListSubfolders("")
-		sort.Strings(subfolders)
-		if len(subfolders) > 0 {
-			l.items = append(l.items, ListItem{Type: "header", Name: "Folders"})
-			for _, f := range subfolders {
-				l.items = append(l.items, ListItem{Type: "folder", Name: f})
-			}
-		}
-
-		// Root workspaces
-		rootWs := l.store.ListRootWorkspaces()
-		if len(rootWs) > 0 {
-			l.items = append(l.items, ListItem{Type: "header", Name: "Workspaces"})
-			for _, ws := range rootWs {
-				wsCopy := ws
-				l.items = append(l.items, ListItem{Type: "workspace", Name: ws.Name, Workspace: &wsCopy})
 			}
 		}
 	} else {
@@ -349,6 +343,17 @@ func (l *ListView) View() string {
 			case "header":
 				// Section header
 				b.WriteString("\n")
+				if item.Name == "Herdr Sessions" {
+					dividerWidth := l.width - 4
+					if dividerWidth < 24 {
+						dividerWidth = 40
+					}
+					if dividerWidth > 52 {
+						dividerWidth = 52
+					}
+					b.WriteString(mutedStyle.Render(strings.Repeat("─", dividerWidth)))
+					b.WriteString("\n")
+				}
 				b.WriteString(labelStyle.Render(item.Name))
 				b.WriteString("\n")
 

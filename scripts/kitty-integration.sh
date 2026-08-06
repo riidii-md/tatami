@@ -2,8 +2,9 @@
 # Tatami x Kitty integration
 #
 # Configures the Kitty terminal so that opening a new tab launches Tatami
-# directly (instead of a plain shell). Kitty launches the command without a
-# login shell, so an absolute path to the `tatami` binary is required.
+# through the user's interactive login shell. This gives Tatami the same PATH
+# as a normal terminal, including tools installed in locations such as
+# ~/.local/bin.
 #
 # Usage:
 #   scripts/kitty-integration.sh            # install / update the config block
@@ -44,18 +45,34 @@ resolve_bin() {
     printf '%s\n' "$(cd "$(dirname "$bin")" && pwd)/$(basename "$bin")"
 }
 
+resolve_shell() {
+    local shell_bin="${SHELL:-/bin/sh}"
+    if [[ "$shell_bin" != /* ]]; then
+        shell_bin="$(command -v "$shell_bin")"
+    fi
+    printf '%s\n' "$shell_bin"
+}
+
+shell_quote() {
+    local value="$1"
+    value=${value//\'/\'"\'"\'}
+    printf "'%s'" "$value"
+}
+
 # --- build the config block ----------------------------------------------------
 build_block() {
     local bin="$1"
+    local shell_bin quoted_bin
+    shell_bin="$(resolve_shell)"
+    quoted_bin="$(shell_quote "$bin")"
     cat <<EOF
 $MARKER_BEGIN
-# Open a new tab straight into Tatami. Kitty runs the command without a login
-# shell, so the absolute path is required (regenerate with the setup script if
-# tatami moves). Use the *-shift-t bindings for a plain shell tab.
-map kitty_mod+t launch --type=tab --cwd=current $bin --new-tab
+# Open Tatami with the same interactive login environment as a normal shell so
+# user-installed tools remain discoverable. Use *-shift-t for a plain shell tab.
+map kitty_mod+t launch --type=tab --cwd=current $shell_bin -lic "exec $quoted_bin --new-tab"
 map kitty_mod+shift+t new_tab_with_cwd
 # macOS: cmd+t / cmd+shift+t are Kitty's built-in tab shortcuts; override them too.
-map cmd+t launch --type=tab --cwd=current $bin --new-tab
+map cmd+t launch --type=tab --cwd=current $shell_bin -lic "exec $quoted_bin --new-tab"
 map cmd+shift+t new_tab_with_cwd
 $MARKER_END
 EOF
