@@ -92,6 +92,97 @@ func TestNewTabTargetUsesSelectedWorktree(t *testing.T) {
 	}
 }
 
+func TestHerdrTargetUsesSelectedWorktreeAndSavedLayout(t *testing.T) {
+	ws := &workspace.Workspace{
+		Name: "project",
+		Path: "/tmp/project",
+		Layout: workspace.Layout{
+			Type:    workspace.LayoutHerdr,
+			MainCmd: "claude",
+		},
+	}
+	result := &tui.Result{
+		Action:    tui.ActionWorktree,
+		Workspace: ws,
+		Worktree:  &git.Worktree{Path: "/tmp/project-feature", Branch: "feature"},
+		Template:  &workspace.Template{},
+	}
+
+	target, ok := herdrTarget(result)
+	if !ok {
+		t.Fatal("Herdr worktree result was not recognized")
+	}
+	if target.Path != "/tmp/project-feature" || target.Name != "feature" {
+		t.Fatalf("Herdr target = %#v; want selected worktree path and branch", target)
+	}
+	if target.Layout.Type != workspace.LayoutHerdr || target.Layout.MainCmd != "claude" {
+		t.Fatalf("Herdr target layout = %#v; want saved Herdr layout", target.Layout)
+	}
+}
+
+func TestHerdrSessionNameUsesDedicatedOrExplicitExistingMode(t *testing.T) {
+	parent := &workspace.Workspace{Name: "project", Path: "/tmp/project", Layout: workspace.Layout{Type: workspace.LayoutHerdr}}
+	target := &workspace.Workspace{Name: "feature", Path: "/tmp/project-feature", Layout: workspace.Layout{Type: workspace.LayoutHerdr}}
+
+	dedicated := &tui.Result{Workspace: parent, HerdrMode: tui.HerdrOpenDedicated, HerdrSessionName: "feature-review"}
+	if got := herdrSessionName(dedicated, target); got != "feature-review" {
+		t.Fatalf("dedicated session = %q; want feature-review", got)
+	}
+
+	existing := &tui.Result{Workspace: parent, HerdrMode: tui.HerdrOpenExisting, HerdrSessionName: "team-session"}
+	if got := herdrSessionName(existing, target); got != "team-session" {
+		t.Fatalf("existing session = %q; want team-session", got)
+	}
+}
+
+func TestHerdrDedicatedModeFallsBackToGeneratedSessionName(t *testing.T) {
+	target := &workspace.Workspace{Name: "feature", Layout: workspace.Layout{Type: workspace.LayoutHerdr}}
+	result := &tui.Result{HerdrMode: tui.HerdrOpenDedicated}
+
+	if got := herdrSessionName(result, target); got != "tatami-feature" {
+		t.Fatalf("generated dedicated session = %q; want tatami-feature", got)
+	}
+}
+
+func TestHerdrExistingModeRequiresSelectedSession(t *testing.T) {
+	parent := &workspace.Workspace{Name: "project", Layout: workspace.Layout{Type: workspace.LayoutHerdr}}
+	target := &workspace.Workspace{Name: "feature", Layout: workspace.Layout{Type: workspace.LayoutHerdr}}
+	result := &tui.Result{Workspace: parent, HerdrMode: tui.HerdrOpenExisting}
+
+	if got := herdrSessionName(result, target); got != "" {
+		t.Fatalf("existing session without selection = %q; want empty", got)
+	}
+}
+
+func TestHerdrTargetUsesSelectedTemplate(t *testing.T) {
+	ws := &workspace.Workspace{
+		Name:   "project",
+		Path:   "/tmp/project",
+		Layout: workspace.Layout{Type: workspace.LayoutHerdr},
+	}
+	template := &workspace.Template{
+		Name:    "agents",
+		MainCmd: "nvim",
+		Panes:   []workspace.Pane{{Command: "claude", Direction: "right"}},
+	}
+	result := &tui.Result{
+		Action:    tui.ActionWithTemplate,
+		Workspace: ws,
+		Template:  template,
+	}
+
+	target, ok := herdrTarget(result)
+	if !ok {
+		t.Fatal("Herdr template result was not recognized")
+	}
+	if target.Layout.Type != workspace.LayoutHerdr || target.Layout.MainCmd != "nvim" {
+		t.Fatalf("Herdr template layout = %#v; want selected template on Herdr", target.Layout)
+	}
+	if !reflect.DeepEqual(target.Layout.Panes, template.Panes) {
+		t.Fatalf("Herdr template panes = %#v; want %#v", target.Layout.Panes, template.Panes)
+	}
+}
+
 func TestKittyConfigLaunchesNewTabMode(t *testing.T) {
 	cmd := exec.Command("bash", "../../scripts/kitty-integration.sh", "--print")
 	cmd.Env = append(os.Environ(), "TATAMI_BIN=/tmp/tatami")

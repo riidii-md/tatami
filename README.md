@@ -144,6 +144,7 @@ Use `stack` direction to create stacked/tabbed panes that share the same space. 
 | `j` / `↓` | Move down |
 | `k` / `↑` | Move up |
 | `Enter` / `l` | Open action menu / Enter folder |
+| `Enter` on a Herdr session | Start/attach to that session |
 | `h` / `Esc` | Go back (in folder) / Quit (at root) |
 | `n` | New workspace |
 | `e` | Edit workspace |
@@ -304,7 +305,16 @@ Workspaces are stored in `~/.config/tatami/workspaces.json`:
 
 ### Herdr Layout Backend
 
-Set `layout.type` to `herdr` to let Tatami use Herdr as the runtime for the workspace. Tatami creates a Herdr session named `tatami-<workspace>`, creates the root workspace with the configured `path`, splits panes from the saved layout, starts known AI commands such as `claude`, `codex`, and `gemini` via `herdr agent start`, runs other commands with `herdr pane run`, then attaches to the Herdr session.
+Set `layout.type` to `herdr` to make Herdr the runtime for every way that workspace is opened, including its saved layout, a selected template, or a Git worktree. Before opening any of those targets, Tatami asks where it should go:
+
+- **New / separate Herdr session** opens a name field prefilled with `tatami-<workspace>` or `tatami-<branch>`. Accept the generated name or enter a custom session name.
+- **Existing Herdr session** shows every known running or stopped session. Choose any session to add the project, template target, or worktree as a workspace there.
+
+When the selected session already contains the same working directory, Tatami focuses and attaches to it without replaying layout commands. Otherwise, Tatami creates the root workspace with the selected project or worktree path as its working directory, splits panes from the chosen layout, starts known AI commands such as `claude`, `codex`, and `gemini` via `herdr agent start`, runs other commands with `herdr pane run`, then attaches to the Herdr session.
+
+When Tatami itself is launched from a Herdr pane, the current session is marked and placed first in the existing-session picker. Selecting it creates or focuses the target workspace in the same Herdr server and returns to the original pane without launching a nested Herdr client.
+
+The Tatami home page reads Herdr's session inventory and shows every known Herdr session with its running or stopped status. Select a session and press Enter to start or attach to it directly. Press `x` to stop a running session; on a stopped named session, `x` opens a confirmation before deleting its persisted session state. Herdr's built-in `default` session cannot be deleted. Herdr 0.8 does not expose a supported command for renaming an existing session, so session names are chosen when a new session is opened.
 
 This keeps Tatami responsible for selecting the local workspace while Herdr owns the agent panes, status, and control plane.
 
