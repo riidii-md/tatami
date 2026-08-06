@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -66,6 +67,17 @@ func (h *HerdrRunner) RunWithLayout(ws *workspace.Workspace) error {
 	if err := h.ensureSession(session); err != nil {
 		return err
 	}
+	existing, err := h.existingWorkspace(session, ws)
+	if err != nil {
+		return err
+	}
+	if existing != "" {
+		if _, err := h.exec("--session", session, "workspace", "focus", existing); err != nil {
+			return fmt.Errorf("failed to focus herdr workspace %s: %w", existing, err)
+		}
+		_, err = h.exec("--session", session)
+		return err
+	}
 	rootPane, err := h.createWorkspace(session, ws)
 	if err != nil {
 		return err
@@ -121,6 +133,56 @@ func (h *HerdrRunner) sessionRunning(session string) bool {
 		Running bool `json:"running"`
 	}
 	return json.Unmarshal(out, &status) == nil && status.Running
+}
+
+func (h *HerdrRunner) existingWorkspace(session string, ws *workspace.Workspace) (string, error) {
+	out, err := h.exec("--session", session, "workspace", "list")
+	if err != nil {
+		return "", fmt.Errorf("failed to list herdr workspaces: %w", err)
+	}
+	var response struct {
+		Result struct {
+			Workspaces []struct {
+				ID    string `json:"workspace_id"`
+				Label string `json:"label"`
+			} `json:"workspaces"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(out, &response); err != nil {
+		return "", fmt.Errorf("failed to parse herdr workspace list: %w", err)
+	}
+
+	foundLabel := false
+	for _, candidate := range response.Result.Workspaces {
+		if candidate.Label != ws.Name {
+			continue
+		}
+		foundLabel = true
+		paneOut, err := h.exec("--session", session, "pane", "list", "--workspace", candidate.ID)
+		if err != nil {
+			return "", fmt.Errorf("failed to list panes for herdr workspace %s: %w", candidate.ID, err)
+		}
+		var paneResponse struct {
+			Result struct {
+				Panes []struct {
+					Cwd string `json:"cwd"`
+				} `json:"panes"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(paneOut, &paneResponse); err != nil {
+			return "", fmt.Errorf("failed to parse panes for herdr workspace %s: %w", candidate.ID, err)
+		}
+		for _, pane := range paneResponse.Result.Panes {
+			if filepath.Clean(pane.Cwd) == filepath.Clean(ws.Path) {
+				return candidate.ID, nil
+			}
+		}
+	}
+
+	if foundLabel {
+		return "", fmt.Errorf("herdr session %s already contains workspace %q at a different working directory", session, ws.Name)
+	}
+	return "", nil
 }
 
 // SessionName returns the default Herdr session name for a Tatami workspace.

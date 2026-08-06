@@ -304,7 +304,7 @@ Workspaces are stored in `~/.config/tatami/workspaces.json`:
 
 ### Herdr Layout Backend
 
-Set `layout.type` to `herdr` to make Herdr the runtime for every way that workspace is opened, including its saved layout, a selected template, or a Git worktree. Tatami starts or reuses a Herdr server named `tatami-<workspace>`, creates the root workspace with the selected project or worktree path as its working directory, splits panes from the chosen layout, starts known AI commands such as `claude`, `codex`, and `gemini` via `herdr agent start`, runs other commands with `herdr pane run`, then attaches to the Herdr session.
+Set `layout.type` to `herdr` to make Herdr the runtime for every way that workspace is opened, including its saved layout, a selected template, or a Git worktree. Tatami starts or reuses a Herdr server named `tatami-<workspace>`. When that session already contains the same workspace and working directory, Tatami focuses and attaches to it without replaying layout commands. Otherwise, Tatami creates the root workspace with the selected project or worktree path as its working directory, splits panes from the chosen layout, starts known AI commands such as `claude`, `codex`, and `gemini` via `herdr agent start`, runs other commands with `herdr pane run`, then attaches to the Herdr session.
 
 This keeps Tatami responsible for selecting the local workspace while Herdr owns the agent panes, status, and control plane.
 
