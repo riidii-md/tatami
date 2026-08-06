@@ -138,6 +138,17 @@ func (h *HerdrRunner) StopSession(session string) error {
 	return nil
 }
 
+// DeleteSession removes the persisted state for a stopped named Herdr session.
+func (h *HerdrRunner) DeleteSession(session string) error {
+	if strings.TrimSpace(session) == "" {
+		return fmt.Errorf("herdr session name is required")
+	}
+	if _, err := h.exec("session", "delete", session); err != nil {
+		return fmt.Errorf("failed to delete herdr session %s: %w", session, err)
+	}
+	return nil
+}
+
 // ListHerdrSessions lists all named Herdr sessions, including stopped sessions.
 func ListHerdrSessions() ([]HerdrSession, error) {
 	if _, err := exec.LookPath("herdr"); err != nil {

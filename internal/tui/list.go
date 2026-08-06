@@ -422,7 +422,14 @@ func (l *ListView) View() string {
 	if l.filtering {
 		help = "[enter]confirm  [esc]cancel"
 	} else if selected := l.Selected(); selected != nil && selected.Type == "herdr_session" {
-		help = "[enter]open  [x]stop  [q]uit"
+		switch {
+		case selected.Herdr != nil && selected.Herdr.Running:
+			help = "[enter]open  [x]stop  [q]uit"
+		case selected.Herdr != nil && (selected.Herdr.Default || selected.Name == "default"):
+			help = "[enter]open  built-in session  [q]uit"
+		default:
+			help = "[enter]open  [x]delete  [q]uit"
+		}
 	} else if l.currentFolder != "" {
 		help = "[h/←]back  [n]ew  [e]dit  [d]elete  [*]star  [q]uit"
 	} else if l.inZellij {

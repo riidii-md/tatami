@@ -314,7 +314,7 @@ When the selected session already contains the same working directory, Tatami fo
 
 When Tatami itself is launched from a Herdr pane, the current session is marked and placed first in the existing-session picker. Selecting it creates or focuses the target workspace in the same Herdr server and returns to the original pane without launching a nested Herdr client.
 
-The Tatami home page reads Herdr's session inventory and shows every known Herdr session with its running or stopped status. Select a session and press Enter to start or attach to it directly, or press `x` to stop a running session. Herdr 0.8 does not expose a supported command for renaming an existing session, so session names are chosen when a new session is opened.
+The Tatami home page reads Herdr's session inventory and shows every known Herdr session with its running or stopped status. Select a session and press Enter to start or attach to it directly. Press `x` to stop a running session; on a stopped named session, `x` opens a confirmation before deleting its persisted session state. Herdr's built-in `default` session cannot be deleted. Herdr 0.8 does not expose a supported command for renaming an existing session, so session names are chosen when a new session is opened.
 
 This keeps Tatami responsible for selecting the local workspace while Herdr owns the agent panes, status, and control plane.
 

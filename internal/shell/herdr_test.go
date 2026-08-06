@@ -98,6 +98,22 @@ func TestHerdrStopSessionUsesNamedSessionCommand(t *testing.T) {
 	}
 }
 
+func TestHerdrDeleteSessionUsesNamedSessionCommand(t *testing.T) {
+	var commands [][]string
+	runner := NewHerdrRunnerWithExecutor(func(args ...string) ([]byte, error) {
+		commands = append(commands, append([]string(nil), args...))
+		return nil, nil
+	})
+
+	if err := runner.DeleteSession("old-session"); err != nil {
+		t.Fatalf("DeleteSession returned error: %v", err)
+	}
+	want := [][]string{{"session", "delete", "old-session"}}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("commands = %#v; want %#v", commands, want)
+	}
+}
+
 func TestHerdrRunWithLayoutReusesRunningSession(t *testing.T) {
 	var started bool
 	var commands [][]string

@@ -27,6 +27,7 @@ const (
 	ViewHerdrOpenMode
 	ViewHerdrSessionName
 	ViewHerdrSessionPicker
+	ViewHerdrSessionDelete
 )
 
 // Result represents the outcome of the TUI session
@@ -43,6 +44,7 @@ type Result struct {
 
 type herdrSessionLister func() ([]shell.HerdrSession, error)
 type herdrSessionStopper func(string) error
+type herdrSessionDeleter func(string) error
 
 // AppOption configures optional chooser behavior.
 type AppOption func(*App)
@@ -69,6 +71,13 @@ func WithHerdrSessionStopper(stopper func(string) error) AppOption {
 	}
 }
 
+// WithHerdrSessionDeleter injects the Herdr session deletion operation.
+func WithHerdrSessionDeleter(deleter func(string) error) AppOption {
+	return func(a *App) {
+		a.herdrSessionDeleter = deleter
+	}
+}
+
 // App is the main Bubbletea model
 type App struct {
 	store                  *workspace.Store
@@ -88,6 +97,7 @@ type App struct {
 	herdrOpenModeView      *HerdrOpenModeView
 	herdrSessionNameView   *HerdrSessionNameView
 	herdrSessionPickerView *HerdrSessionPickerView
+	herdrSessionDeleteView *HerdrSessionDeleteView
 	pendingHerdrResult     *Result
 	herdrOpenBackView      View
 	result                 *Result
@@ -97,6 +107,7 @@ type App struct {
 	newTabMode             bool
 	herdrSessionLister     herdrSessionLister
 	herdrSessionStopper    herdrSessionStopper
+	herdrSessionDeleter    herdrSessionDeleter
 }
 
 // NewApp creates a new App
@@ -114,6 +125,7 @@ func NewApp(store *workspace.Store, options ...AppOption) *App {
 		layoutEditor:        NewLayoutEditor(),
 		herdrSessionLister:  shell.ListHerdrSessions,
 		herdrSessionStopper: herdrRunner.StopSession,
+		herdrSessionDeleter: herdrRunner.DeleteSession,
 	}
 	for _, option := range options {
 		option(app)
@@ -174,6 +186,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a.updateHerdrSessionName(msg)
 		case ViewHerdrSessionPicker:
 			return a.updateHerdrSessionPicker(msg)
+		case ViewHerdrSessionDelete:
+			return a.updateHerdrSessionDelete(msg)
 		}
 	}
 
@@ -277,13 +291,22 @@ func (a *App) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "x":
 		item := a.listView.Selected()
-		if item != nil && item.Type == "herdr_session" && item.Herdr != nil && item.Herdr.Running {
+		if item == nil || item.Type != "herdr_session" || item.Herdr == nil {
+			return a, nil
+		}
+		if item.Herdr.Running {
 			if err := a.herdrSessionStopper(item.Name); err != nil {
 				a.err = err
 				return a, nil
 			}
 			a.listView.Refresh()
+			return a, nil
 		}
+		if item.Herdr.Default || item.Name == "default" {
+			return a, nil
+		}
+		a.herdrSessionDeleteView = NewHerdrSessionDeleteView(item.Name)
+		a.currentView = ViewHerdrSessionDelete
 		return a, nil
 
 	case "*", "s":
@@ -633,6 +656,35 @@ func (a *App) updateHerdrSessionPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+func (a *App) updateHerdrSessionDelete(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		a.herdrSessionDeleteView = nil
+		a.currentView = ViewList
+		return a, nil
+	case "enter":
+		if a.herdrSessionDeleteView == nil {
+			a.err = fmt.Errorf("no Herdr session selected for deletion")
+			return a, nil
+		}
+		if !a.herdrSessionDeleteView.Confirmed() {
+			a.herdrSessionDeleteView = nil
+			a.currentView = ViewList
+			return a, nil
+		}
+		if err := a.herdrSessionDeleter(a.herdrSessionDeleteView.sessionName); err != nil {
+			a.err = err
+			return a, nil
+		}
+		a.herdrSessionDeleteView = nil
+		a.listView.Refresh()
+		a.currentView = ViewList
+		return a, nil
+	default:
+		return a, a.herdrSessionDeleteView.Update(msg)
+	}
+}
+
 func (a *App) updateWorktreeActions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "q":
@@ -736,6 +788,8 @@ func (a *App) View() string {
 		return a.herdrSessionNameView.View()
 	case ViewHerdrSessionPicker:
 		return a.herdrSessionPickerView.View()
+	case ViewHerdrSessionDelete:
+		return a.herdrSessionDeleteView.View()
 	default:
 		return ""
 	}

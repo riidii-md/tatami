@@ -395,8 +395,97 @@ func TestHomePageRunningHerdrSessionCanBeStopped(t *testing.T) {
 	if cmd != nil || updated.result != nil {
 		t.Fatalf("stopping session unexpectedly exited: result=%#v cmd=%T", updated.result, cmd)
 	}
-	if !strings.Contains(updated.View(), "[x]stop") {
-		t.Fatalf("session help does not advertise stop action:\n%s", updated.View())
+	if !strings.Contains(updated.View(), "[x]delete") {
+		t.Fatalf("stopped-session help does not advertise delete action:\n%s", updated.View())
+	}
+}
+
+func TestHomePageStoppedHerdrSessionCanBeDeletedAfterConfirmation(t *testing.T) {
+	deleted := false
+	store := newTestStore(t, &workspace.Workspace{Name: "project", Path: "/tmp/project"})
+	app := NewApp(store,
+		WithHerdrSessionLister(func() ([]shell.HerdrSession, error) {
+			if deleted {
+				return nil, nil
+			}
+			return []shell.HerdrSession{{Name: "old-session", Running: false}}, nil
+		}),
+		WithHerdrSessionDeleter(func(name string) error {
+			if name != "old-session" {
+				t.Fatalf("deleted session = %q; want old-session", name)
+			}
+			deleted = true
+			return nil
+		}),
+	)
+	for i, item := range app.listView.items {
+		if item.Type == "herdr_session" {
+			app.listView.cursor = i
+			break
+		}
+	}
+
+	model, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	updated := model.(*App)
+	if updated.currentView != ViewHerdrSessionDelete {
+		t.Fatalf("delete request opened view %v; want ViewHerdrSessionDelete", updated.currentView)
+	}
+	if deleted || cmd != nil {
+		t.Fatalf("session deleted before confirmation: deleted=%v cmd=%T", deleted, cmd)
+	}
+	if !strings.Contains(updated.View(), "old-session") {
+		t.Fatalf("delete confirmation does not name the session:\n%s", updated.View())
+	}
+
+	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated = model.(*App)
+	model, cmd = updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated = model.(*App)
+	if !deleted {
+		t.Fatal("confirmed stopped session was not deleted")
+	}
+	if updated.currentView != ViewList {
+		t.Fatalf("confirmed deletion opened view %v; want ViewList", updated.currentView)
+	}
+	if cmd != nil || updated.result != nil {
+		t.Fatalf("deleting session unexpectedly exited: result=%#v cmd=%T", updated.result, cmd)
+	}
+	for _, item := range updated.listView.items {
+		if item.Type == "herdr_session" && item.Name == "old-session" {
+			t.Fatalf("deleted session remains on home page: %#v", item)
+		}
+	}
+}
+
+func TestHomePageDefaultHerdrSessionCannotBeDeleted(t *testing.T) {
+	deleteCalled := false
+	store := newTestStore(t, &workspace.Workspace{Name: "project", Path: "/tmp/project"})
+	app := NewApp(store,
+		WithHerdrSessionLister(func() ([]shell.HerdrSession, error) {
+			return []shell.HerdrSession{{Name: "default", Running: false, Default: true}}, nil
+		}),
+		WithHerdrSessionDeleter(func(string) error {
+			deleteCalled = true
+			return nil
+		}),
+	)
+	for i, item := range app.listView.items {
+		if item.Type == "herdr_session" {
+			app.listView.cursor = i
+			break
+		}
+	}
+
+	model, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	updated := model.(*App)
+	if deleteCalled {
+		t.Fatal("default Herdr session was sent to the deleter")
+	}
+	if updated.currentView != ViewList || cmd != nil {
+		t.Fatalf("default delete changed view=%v cmd=%T", updated.currentView, cmd)
+	}
+	if !strings.Contains(updated.View(), "built-in") {
+		t.Fatalf("default-session help does not explain why it cannot be deleted:\n%s", updated.View())
 	}
 }
 
