@@ -38,6 +38,12 @@ type CreateView struct {
 	editing     bool
 	editingName string
 	errorMsg    string
+	mobileMode  bool
+}
+
+// SetMobileMode enables compact form rendering.
+func (c *CreateView) SetMobileMode(enabled bool) {
+	c.mobileMode = enabled
 }
 
 // NewCreateView creates a new create view
@@ -422,5 +428,5 @@ func (c *CreateView) View() string {
 	}
 	b.WriteString(helpStyle.Render(help))
 
-	return boxStyle.Render(b.String())
+	return renderPanel(b.String(), c.mobileMode)
 }

@@ -31,6 +31,7 @@ type ListView struct {
 	inZellij      bool
 	width         int
 	height        int
+	mobileMode    bool
 	herdrSessions herdrSessionLister
 }
 
@@ -170,6 +171,72 @@ func (l *ListView) SetSize(width, height int) {
 	l.height = height
 }
 
+// SetMobileMode enables numbered choices and compact phone rendering.
+func (l *ListView) SetMobileMode(enabled bool) {
+	l.mobileMode = enabled
+}
+
+func (l *ListView) compact() bool {
+	return l.mobileMode || (l.width > 0 && l.width <= narrowTerminalWidth)
+}
+
+func (l *ListView) visibleRange() (int, int) {
+	listHeight := l.height - 10
+	if l.compact() {
+		listHeight = l.height - 6
+	}
+	if listHeight < 5 {
+		listHeight = 5
+	}
+	if l.mobileMode && listHeight > 9 {
+		listHeight = 9
+	}
+
+	start := 0
+	end := len(l.items)
+	if end > listHeight {
+		if l.cursor >= listHeight {
+			start = l.cursor - listHeight + 1
+		}
+		end = start + listHeight
+		if end > len(l.items) {
+			end = len(l.items)
+			start = end - listHeight
+		}
+	}
+	return start, end
+}
+
+func (l *ListView) visibleOrdinal(itemIndex, start int) int {
+	ordinal := 0
+	for i := start; i <= itemIndex && i < len(l.items); i++ {
+		if l.items[i].Type == "header" {
+			continue
+		}
+		if i == itemIndex {
+			return ordinal
+		}
+		ordinal++
+	}
+	return -1
+}
+
+func (l *ListView) selectVisibleNumber(key string) bool {
+	start, end := l.visibleRange()
+	selectable := make([]int, 0, end-start)
+	for i := start; i < end && len(selectable) < 9; i++ {
+		if l.items[i].Type != "header" {
+			selectable = append(selectable, i)
+		}
+	}
+	index, ok := numberKeyIndex(key, len(selectable))
+	if !ok {
+		return false
+	}
+	l.cursor = selectable[index]
+	return true
+}
+
 // Selected returns the currently selected item
 func (l *ListView) Selected() *ListItem {
 	if len(l.items) == 0 || l.cursor >= len(l.items) {
@@ -210,6 +277,7 @@ func (l *ListView) EnterFolder(name string) {
 		l.cursor = 1
 	} else {
 		l.cursor = 0
+		l.skipHeaders(1)
 	}
 }
 
@@ -241,6 +309,9 @@ func (l *ListView) Update(msg tea.Msg) tea.Cmd {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if l.mobileMode && l.selectVisibleNumber(msg.String()) {
+			return nil
+		}
 		switch msg.String() {
 		case "j", "down":
 			if l.cursor < len(l.items)-1 {
@@ -300,7 +371,11 @@ func (l *ListView) View() string {
 		title = "TATAMI - " + l.currentFolder
 	}
 	b.WriteString(titleStyle.Render(title))
-	b.WriteString("\n\n")
+	if l.compact() {
+		b.WriteString("\n")
+	} else {
+		b.WriteString("\n\n")
+	}
 
 	// Filter input (if active)
 	if l.filtering {
@@ -318,23 +393,7 @@ func (l *ListView) View() string {
 			b.WriteString(mutedStyle.Render("Empty folder. Press 'n' to create a workspace."))
 		}
 	} else {
-		listHeight := l.height - 10
-		if listHeight < 5 {
-			listHeight = 5
-		}
-
-		start := 0
-		end := len(l.items)
-		if end > listHeight {
-			if l.cursor >= listHeight {
-				start = l.cursor - listHeight + 1
-			}
-			end = start + listHeight
-			if end > len(l.items) {
-				end = len(l.items)
-				start = end - listHeight
-			}
-		}
+		start, end := l.visibleRange()
 
 		for i := start; i < end; i++ {
 			item := l.items[i]
@@ -358,10 +417,9 @@ func (l *ListView) View() string {
 				b.WriteString("\n")
 
 			case "folder":
-				cursor := "  "
+				cursor := choicePrefix(l.mobileMode, l.visibleOrdinal(i, start), i == l.cursor)
 				style := normalStyle
 				if i == l.cursor {
-					cursor = "> "
 					style = selectedStyle
 				}
 				icon := "📁 "
@@ -371,10 +429,9 @@ func (l *ListView) View() string {
 				b.WriteString(fmt.Sprintf("%s%s%s/\n", cursor, icon, style.Render(item.Name)))
 
 			case "workspace":
-				cursor := "  "
+				cursor := choicePrefix(l.mobileMode, l.visibleOrdinal(i, start), i == l.cursor)
 				style := normalStyle
 				if i == l.cursor {
-					cursor = "> "
 					style = selectedStyle
 				}
 				ws := item.Workspace
@@ -394,14 +451,16 @@ func (l *ListView) View() string {
 					star = "★ "
 				}
 
-				line := fmt.Sprintf("%s%s%-20s %s", cursor, star, name, path)
+				line := fmt.Sprintf("%s%s%s", cursor, star, name)
+				if !l.compact() {
+					line = fmt.Sprintf("%s%s%-20s %s", cursor, star, name, path)
+				}
 				b.WriteString(line + "\n")
 
 			case "herdr_session":
-				cursor := "  "
+				cursor := choicePrefix(l.mobileMode, l.visibleOrdinal(i, start), i == l.cursor)
 				style := normalStyle
 				if i == l.cursor {
-					cursor = "> "
 					style = selectedStyle
 				}
 				status := "○"
@@ -411,11 +470,15 @@ func (l *ListView) View() string {
 					statusText = "running"
 				}
 				name := style.Render(item.Name)
-				b.WriteString(fmt.Sprintf("%s%s %-20s %s\n", cursor, status, name, mutedStyle.Render(statusText)))
+				if l.compact() {
+					b.WriteString(fmt.Sprintf("%s%s %s %s\n", cursor, status, name, mutedStyle.Render(statusText)))
+				} else {
+					b.WriteString(fmt.Sprintf("%s%s %-20s %s\n", cursor, status, name, mutedStyle.Render(statusText)))
+				}
 			}
 		}
 
-		if len(l.items) > listHeight {
+		if start > 0 || end < len(l.items) {
 			scrollInfo := fmt.Sprintf(" (%d/%d)", l.cursor+1, len(l.items))
 			b.WriteString(mutedStyle.Render(scrollInfo))
 			b.WriteString("\n")
@@ -424,7 +487,21 @@ func (l *ListView) View() string {
 
 	// Help text
 	var help string
-	if l.filtering {
+	if l.mobileMode && !l.filtering {
+		help = "[↑↓/1-9]select  [enter]open"
+		if l.currentFolder != "" {
+			help += "  [b]back"
+		}
+		if selected := l.Selected(); selected != nil && selected.Type == "herdr_session" {
+			if selected.Herdr != nil && selected.Herdr.Running {
+				help += "\n[x]stop  [q]uit"
+			} else if selected.Herdr != nil && !selected.Herdr.Default && selected.Name != "default" {
+				help += "\n[x]delete  [q]uit"
+			}
+		} else {
+			help += "\n[n]ew [e]dit [d]elete [*]star [/]filter [q]uit"
+		}
+	} else if l.filtering {
 		help = "[enter]confirm  [esc]cancel"
 	} else if selected := l.Selected(); selected != nil && selected.Type == "herdr_session" {
 		switch {
@@ -444,7 +521,11 @@ func (l *ListView) View() string {
 	}
 	b.WriteString(helpStyle.Render(help))
 
-	return lipgloss.NewStyle().Padding(1, 2).Render(b.String())
+	padding := lipgloss.NewStyle().Padding(1, 2)
+	if l.compact() {
+		padding = lipgloss.NewStyle().Padding(0, 1)
+	}
+	return padding.Render(b.String())
 }
 
 func shortenPath(path string, maxLen int) string {

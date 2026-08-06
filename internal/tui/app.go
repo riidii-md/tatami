@@ -57,6 +57,13 @@ func WithNewTabMode() AppOption {
 	}
 }
 
+// WithMobileMode enables phone-friendly navigation and compact rendering.
+func WithMobileMode() AppOption {
+	return func(a *App) {
+		a.mobileMode = true
+	}
+}
+
 // WithHerdrSessionLister injects the Herdr session source used by the home page and session picker.
 func WithHerdrSessionLister(lister func() ([]shell.HerdrSession, error)) AppOption {
 	return func(a *App) {
@@ -105,6 +112,7 @@ type App struct {
 	height                 int
 	err                    error
 	newTabMode             bool
+	mobileMode             bool
 	herdrSessionLister     herdrSessionLister
 	herdrSessionStopper    herdrSessionStopper
 	herdrSessionDeleter    herdrSessionDeleter
@@ -132,7 +140,13 @@ func NewApp(store *workspace.Store, options ...AppOption) *App {
 	}
 	app.listView = NewListViewWithHerdrSessions(store, app.herdrSessionLister)
 	app.listView.SetInZellij(zellij.IsInsideSession())
+	app.applyMobileMode(app.listView)
+	app.applyMobileMode(app.createView)
 	return app
+}
+
+func (a *App) applyMobileMode(view mobileModeSetter) {
+	view.SetMobileMode(a.mobileMode)
 }
 
 // Result returns the result of the TUI session
@@ -158,6 +172,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Global quit
 		if msg.String() == "ctrl+c" {
 			return a, tea.Quit
+		}
+		if handled, model, cmd := a.handleMobileBack(msg); handled {
+			return model, cmd
 		}
 
 		// View-specific handling
@@ -192,6 +209,33 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return a, nil
+}
+
+func (a *App) handleMobileBack(msg tea.KeyMsg) (bool, tea.Model, tea.Cmd) {
+	if !a.mobileMode || msg.String() != "b" {
+		return false, a, nil
+	}
+
+	switch a.currentView {
+	case ViewList:
+		if a.listView.IsFiltering() {
+			return false, a, nil
+		}
+		if a.listView.CurrentFolder() == "" {
+			return true, a, nil
+		}
+	case ViewActions, ViewTemplates, ViewWorktreeActions, ViewSessions,
+		ViewHerdrOpenMode, ViewHerdrSessionPicker, ViewHerdrSessionDelete:
+	case ViewWorktree:
+		if a.worktreeView == nil || a.worktreeView.Mode() == WorktreeModeCreate {
+			return false, a, nil
+		}
+	default:
+		return false, a, nil
+	}
+
+	model, cmd := a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	return true, model, cmd
 }
 
 func (a *App) updateFolderInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -255,6 +299,7 @@ func (a *App) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.listView.EnterFolder(item.Name)
 		case "workspace":
 			a.actionsView = NewActionView(item.Workspace, a.zellij.IsInsideSession(), a.tmux.IsInsideSession(), a.newTabMode)
+			a.applyMobileMode(a.actionsView)
 			a.currentView = ViewActions
 		case "herdr_session":
 			a.result = &Result{
@@ -306,6 +351,7 @@ func (a *App) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.herdrSessionDeleteView = NewHerdrSessionDeleteView(item.Name)
+		a.applyMobileMode(a.herdrSessionDeleteView)
 		a.currentView = ViewHerdrSessionDelete
 		return a, nil
 
@@ -321,6 +367,7 @@ func (a *App) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "f":
 		// Create folder
 		a.folderInput = NewFolderInput(a.listView.CurrentFolder())
+		a.applyMobileMode(a.folderInput)
 		a.currentView = ViewFolderInput
 		return a, nil
 
@@ -328,6 +375,7 @@ func (a *App) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Open Zellij session browser
 		// canAttach is false when inside Zellij (nested attach doesn't work)
 		a.sessionView = NewSessionView(!a.zellij.IsInsideSession())
+		a.applyMobileMode(a.sessionView)
 		a.currentView = ViewSessions
 		return a, nil
 
@@ -386,6 +434,7 @@ func (a *App) updateCreate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "f2":
 		// Open template picker
 		a.templateView = NewTemplateView()
+		a.applyMobileMode(a.templateView)
 		a.previousView = ViewCreate
 		a.currentView = ViewTemplates
 		return a, nil
@@ -408,6 +457,7 @@ func (a *App) updateActions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// If template action, show template picker
 		if action == ActionWithTemplate {
 			a.templateView = NewTemplateView()
+			a.applyMobileMode(a.templateView)
 			a.previousView = ViewActions
 			a.currentView = ViewTemplates
 			return a, nil
@@ -416,6 +466,7 @@ func (a *App) updateActions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// If worktree action, show worktree picker
 		if action == ActionWorktree {
 			a.worktreeView = NewWorktreeView(ws.Path)
+			a.applyMobileMode(a.worktreeView)
 			a.currentView = ViewWorktree
 			return a, nil
 		}
@@ -544,6 +595,7 @@ func (a *App) updateWorktree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, tea.Quit
 		}
 		a.worktreeActionView = NewWorktreeActionView(wt, ws)
+		a.applyMobileMode(a.worktreeActionView)
 		a.currentView = ViewWorktreeActions
 		return a, nil
 	}
@@ -555,6 +607,7 @@ func (a *App) beginHerdrOpen(result *Result, backView View) {
 	a.pendingHerdrResult = result
 	a.herdrOpenBackView = backView
 	a.herdrOpenModeView = NewHerdrOpenModeView()
+	a.applyMobileMode(a.herdrOpenModeView)
 	a.currentView = ViewHerdrOpenMode
 }
 
@@ -563,6 +616,7 @@ func (a *App) updateHerdrOpenMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "q":
 		if a.herdrOpenBackView == ViewWorktree && a.actionsView != nil {
 			a.worktreeView = NewWorktreeView(a.actionsView.Workspace().Path)
+			a.applyMobileMode(a.worktreeView)
 		}
 		a.pendingHerdrResult = nil
 		a.currentView = a.herdrOpenBackView
@@ -581,10 +635,12 @@ func (a *App) updateHerdrOpenMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				currentSession = strings.TrimSpace(os.Getenv("HERDR_SESSION"))
 			}
 			a.herdrSessionPickerView = NewHerdrSessionPickerView(sessions, currentSession, err)
+			a.applyMobileMode(a.herdrSessionPickerView)
 			a.currentView = ViewHerdrSessionPicker
 			return a, nil
 		}
 		a.herdrSessionNameView = NewHerdrSessionNameView(defaultHerdrSessionName(a.pendingHerdrResult))
+		a.applyMobileMode(a.herdrSessionNameView)
 		a.currentView = ViewHerdrSessionName
 		return a, nil
 	default:
@@ -690,6 +746,7 @@ func (a *App) updateWorktreeActions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "q":
 		// Reset worktree selection and go back to worktree list
 		a.worktreeView = NewWorktreeView(a.actionsView.Workspace().Path)
+		a.applyMobileMode(a.worktreeView)
 		a.currentView = ViewWorktree
 		return a, nil
 
@@ -701,6 +758,7 @@ func (a *App) updateWorktreeActions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch action {
 		case WorktreeActionWithTemplate:
 			a.templateView = NewTemplateView()
+			a.applyMobileMode(a.templateView)
 			a.previousView = ViewWorktreeActions
 			a.currentView = ViewTemplates
 			return a, nil

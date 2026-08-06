@@ -95,6 +95,17 @@ sessions, set `show_startup_tips false` in `~/.config/zellij/config.kdl`.
 tatami
 ```
 
+For compact, phone-friendly navigation over SSH:
+
+```bash
+tatami --mobile # or: tatami -m
+```
+
+Mobile mode shows numbered choices, keeps `Enter` as confirmation, adds `b` as
+a safe Back key outside text fields, hides paths on the home screen, and removes
+decorative menu borders. See [Mobile navigation with Termius](docs/mobile-navigation.md)
+for the recommended Termius shortcut bar and Startup Command.
+
 ## Features
 
 ### Folders
@@ -146,7 +157,9 @@ Use `stack` direction to create stacked/tabbed panes that share the same space. 
 |-----|--------|
 | `j` / `↓` | Move down |
 | `k` / `↑` | Move up |
+| `1`–`9` | Select a visible row in mobile mode |
 | `Enter` / `l` | Open action menu / Enter folder |
+| `b` | Go back in mobile mode (outside text inputs) |
 | `Enter` on a Herdr session | Start/attach to that session |
 | `h` / `Esc` | Go back (in folder) / Quit (at root) |
 | `n` | New workspace |

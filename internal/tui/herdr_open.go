@@ -18,7 +18,13 @@ const (
 
 // HerdrOpenModeView lets the user choose where a Herdr target is opened.
 type HerdrOpenModeView struct {
-	cursor int
+	cursor     int
+	mobileMode bool
+}
+
+// SetMobileMode enables numbered, compact menu rendering.
+func (v *HerdrOpenModeView) SetMobileMode(enabled bool) {
+	v.mobileMode = enabled
 }
 
 func NewHerdrOpenModeView() *HerdrOpenModeView {
@@ -39,6 +45,12 @@ func (v *HerdrOpenModeView) Update(msg tea.Msg) tea.Cmd {
 		v.cursor = 1
 	case "k", "up":
 		v.cursor = 0
+	default:
+		if v.mobileMode {
+			if index, ok := numberKeyIndex(key.String(), 2); ok {
+				v.cursor = index
+			}
+		}
 	}
 	return nil
 }
@@ -52,23 +64,32 @@ func (v *HerdrOpenModeView) View() string {
 	b.WriteString(titleStyle.Render("Open in Herdr"))
 	b.WriteString("\n\n")
 	for i, label := range labels {
-		cursor := "  "
+		cursor := choicePrefix(v.mobileMode, i, i == v.cursor)
 		style := normalStyle
 		if i == v.cursor {
-			cursor = "> "
 			style = selectedStyle
 		}
 		b.WriteString(cursor)
 		b.WriteString(style.Render(label))
 		b.WriteString("\n")
 	}
-	b.WriteString(helpStyle.Render("\n[enter]select  [esc]back"))
-	return boxStyle.Render(b.String())
+	help := "\n[enter]select  [esc]back"
+	if v.mobileMode {
+		help = "\n[↑↓/1-9]select  [enter]open  [b]back"
+	}
+	b.WriteString(helpStyle.Render(help))
+	return renderPanel(b.String(), v.mobileMode)
 }
 
 // HerdrSessionNameView lets the user accept or replace a generated session name.
 type HerdrSessionNameView struct {
-	input textinput.Model
+	input      textinput.Model
+	mobileMode bool
+}
+
+// SetMobileMode enables compact input rendering.
+func (v *HerdrSessionNameView) SetMobileMode(enabled bool) {
+	v.mobileMode = enabled
 }
 
 func NewHerdrSessionNameView(defaultName string) *HerdrSessionNameView {
@@ -100,7 +121,7 @@ func (v *HerdrSessionNameView) View() string {
 	b.WriteString(v.input.View())
 	b.WriteString("\n")
 	b.WriteString(helpStyle.Render("\n[enter]open  [esc]back"))
-	return boxStyle.Render(b.String())
+	return renderPanel(b.String(), v.mobileMode)
 }
 
 // HerdrSessionPickerView lets the user select any known Herdr session.
@@ -109,6 +130,12 @@ type HerdrSessionPickerView struct {
 	cursor         int
 	currentSession string
 	err            error
+	mobileMode     bool
+}
+
+// SetMobileMode enables numbered, compact menu rendering.
+func (v *HerdrSessionPickerView) SetMobileMode(enabled bool) {
+	v.mobileMode = enabled
 }
 
 func NewHerdrSessionPickerView(sessions []shell.HerdrSession, currentSession string, err error) *HerdrSessionPickerView {
@@ -162,6 +189,12 @@ func (v *HerdrSessionPickerView) Update(msg tea.Msg) tea.Cmd {
 		if len(v.sessions) > 0 {
 			v.cursor = len(v.sessions) - 1
 		}
+	default:
+		if v.mobileMode {
+			if index, ok := numberKeyIndex(key.String(), len(v.sessions)); ok {
+				v.cursor = index
+			}
+		}
 	}
 	return nil
 }
@@ -178,10 +211,9 @@ func (v *HerdrSessionPickerView) View() string {
 		b.WriteString("\n")
 	} else {
 		for i, session := range v.sessions {
-			cursor := "  "
+			cursor := choicePrefix(v.mobileMode, i, i == v.cursor)
 			style := normalStyle
 			if i == v.cursor {
-				cursor = "> "
 				style = selectedStyle
 			}
 			label := session.Name
@@ -197,6 +229,10 @@ func (v *HerdrSessionPickerView) View() string {
 			b.WriteString("\n")
 		}
 	}
-	b.WriteString(helpStyle.Render("\n[enter]select  [esc]back"))
-	return boxStyle.Render(b.String())
+	help := "\n[enter]select  [esc]back"
+	if v.mobileMode {
+		help = "\n[↑↓/1-9]select  [enter]open  [b]back"
+	}
+	b.WriteString(helpStyle.Render(help))
+	return renderPanel(b.String(), v.mobileMode)
 }

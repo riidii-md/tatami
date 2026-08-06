@@ -11,6 +11,12 @@ import (
 type HerdrSessionDeleteView struct {
 	sessionName string
 	cursor      int
+	mobileMode  bool
+}
+
+// SetMobileMode enables numbered, compact confirmation rendering.
+func (v *HerdrSessionDeleteView) SetMobileMode(enabled bool) {
+	v.mobileMode = enabled
 }
 
 func NewHerdrSessionDeleteView(sessionName string) *HerdrSessionDeleteView {
@@ -31,6 +37,12 @@ func (v *HerdrSessionDeleteView) Update(msg tea.Msg) tea.Cmd {
 		v.cursor = 1
 	case "k", "up":
 		v.cursor = 0
+	default:
+		if v.mobileMode {
+			if index, ok := numberKeyIndex(key.String(), 2); ok {
+				v.cursor = index
+			}
+		}
 	}
 	return nil
 }
@@ -45,16 +57,19 @@ func (v *HerdrSessionDeleteView) View() string {
 	b.WriteString(mutedStyle.Render("Its saved spaces will be removed."))
 	b.WriteString("\n\n")
 	for i, label := range labels {
-		cursor := "  "
+		cursor := choicePrefix(v.mobileMode, i, i == v.cursor)
 		style := normalStyle
 		if i == v.cursor {
-			cursor = "> "
 			style = selectedStyle
 		}
 		b.WriteString(cursor)
 		b.WriteString(style.Render(label))
 		b.WriteString("\n")
 	}
-	b.WriteString(helpStyle.Render("\n[enter]select  [esc]back"))
-	return boxStyle.Render(b.String())
+	help := "\n[enter]select  [esc]back"
+	if v.mobileMode {
+		help = "\n[↑↓/1-9]select  [enter]confirm  [b]back"
+	}
+	b.WriteString(helpStyle.Render(help))
+	return renderPanel(b.String(), v.mobileMode)
 }

@@ -3,14 +3,20 @@ package tui
 import (
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // TemplateView displays the template picker
 type TemplateView struct {
-	templates []workspace.Template
-	cursor    int
+	templates  []workspace.Template
+	cursor     int
+	mobileMode bool
+}
+
+// SetMobileMode enables numbered, compact menu rendering.
+func (t *TemplateView) SetMobileMode(enabled bool) {
+	t.mobileMode = enabled
 }
 
 // NewTemplateView creates a new template view
@@ -33,6 +39,12 @@ func (t *TemplateView) Selected() *workspace.Template {
 func (t *TemplateView) Update(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if t.mobileMode {
+			if index, ok := numberKeyIndex(msg.String(), len(t.templates)); ok {
+				t.cursor = index
+				return nil
+			}
+		}
 		switch msg.String() {
 		case "j", "down":
 			if t.cursor < len(t.templates)-1 {
@@ -61,19 +73,25 @@ func (t *TemplateView) View() string {
 	b.WriteString("\n\n")
 
 	for i, tmpl := range t.templates {
-		cursor := "  "
+		cursor := choicePrefix(t.mobileMode, i, i == t.cursor)
 		style := normalStyle
 		if i == t.cursor {
-			cursor = "> "
 			style = selectedStyle
 		}
 
 		name := style.Render(tmpl.Name)
-		desc := mutedStyle.Render(" - " + tmpl.Description)
+		desc := ""
+		if !t.mobileMode {
+			desc = mutedStyle.Render(" - " + tmpl.Description)
+		}
 		b.WriteString(cursor + name + desc + "\n")
 	}
 
-	b.WriteString(helpStyle.Render("\n[enter]select  [esc]cancel"))
+	help := "\n[enter]select  [esc]cancel"
+	if t.mobileMode {
+		help = "\n[↑↓/1-9]select  [enter]apply  [b]back"
+	}
+	b.WriteString(helpStyle.Render(help))
 
-	return boxStyle.Render(b.String())
+	return renderPanel(b.String(), t.mobileMode)
 }

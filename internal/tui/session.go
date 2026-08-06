@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/OleksandrBesan/tatami/internal/shell"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/OleksandrBesan/tatami/internal/shell"
 )
 
 // SessionMode represents the current mode of the session view
@@ -19,15 +19,21 @@ const (
 
 // SessionView displays Zellij sessions
 type SessionView struct {
-	sessions      []shell.ZellijSession
-	cursor        int
-	mode          SessionMode
-	showExited    bool // Show exited sessions
-	canAttach     bool // Can attach (false when inside Zellij)
-	deleteTarget  string
-	width         int
-	height        int
-	err           error
+	sessions     []shell.ZellijSession
+	cursor       int
+	mode         SessionMode
+	showExited   bool // Show exited sessions
+	canAttach    bool // Can attach (false when inside Zellij)
+	deleteTarget string
+	width        int
+	height       int
+	err          error
+	mobileMode   bool
+}
+
+// SetMobileMode enables numbered, compact session rendering.
+func (s *SessionView) SetMobileMode(enabled bool) {
+	s.mobileMode = enabled
 }
 
 // NewSessionView creates a new session view
@@ -121,6 +127,12 @@ func (s *SessionView) Update(msg tea.Msg) tea.Cmd {
 
 func (s *SessionView) updateList(msg tea.KeyMsg) tea.Cmd {
 	visible := s.visibleSessions()
+	if s.mobileMode {
+		if index, ok := numberKeyIndex(msg.String(), len(visible)); ok {
+			s.cursor = index
+			return nil
+		}
+	}
 
 	switch msg.String() {
 	case "j", "down":
@@ -175,7 +187,6 @@ func (s *SessionView) updateConfirmDelete(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
-
 // View renders the session view
 func (s *SessionView) View() string {
 	var b strings.Builder
@@ -190,8 +201,12 @@ func (s *SessionView) View() string {
 
 	if s.mode == SessionModeConfirmDelete {
 		b.WriteString(fmt.Sprintf("Delete session '%s'? ", s.deleteTarget))
-		b.WriteString(helpStyle.Render("[y]es  [n]o"))
-		return boxStyle.Render(b.String())
+		help := "[y]es  [n]o"
+		if s.mobileMode {
+			help += "  [b]back"
+		}
+		b.WriteString(helpStyle.Render(help))
+		return renderPanel(b.String(), s.mobileMode)
 	}
 
 	visible := s.visibleSessions()
@@ -202,17 +217,23 @@ func (s *SessionView) View() string {
 			b.WriteString(mutedStyle.Render("No active sessions. Press 'e' to show exited."))
 		}
 		b.WriteString("\n\n")
-		b.WriteString(helpStyle.Render("[e]xited  [r]efresh  [esc]back"))
+		help := "[e]xited  [r]efresh  [esc]back"
+		if s.mobileMode {
+			help = "[e]xited  [r]efresh  [b]back"
+		}
+		b.WriteString(helpStyle.Render(help))
+		if s.mobileMode {
+			return renderPanel(b.String(), true)
+		}
 		return lipgloss.NewStyle().Padding(1, 2).Render(b.String())
 	}
 
 	// Show sessions
 	for i, session := range visible {
 
-		cursor := "  "
+		cursor := choicePrefix(s.mobileMode, i, i == s.cursor)
 		style := normalStyle
 		if i == s.cursor {
-			cursor = "> "
 			style = selectedStyle
 		}
 
@@ -267,7 +288,17 @@ func (s *SessionView) View() string {
 		}
 		b.WriteString(mutedStyle.Render("Tip: Use Ctrl+o w for Zellij session switcher\n"))
 	}
+	if s.mobileMode {
+		if s.canAttach {
+			help = "[↑↓/1-9]select  [enter]attach\n[d]delete [e]exited [r]refresh [b]back"
+		} else {
+			help = "[↑↓/1-9]select\n[d]delete [e]exited [r]refresh [b]back"
+		}
+	}
 	b.WriteString(helpStyle.Render(help))
 
+	if s.mobileMode {
+		return renderPanel(b.String(), true)
+	}
 	return lipgloss.NewStyle().Padding(1, 2).Render(b.String())
 }

@@ -4,10 +4,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/OleksandrBesan/tatami/internal/docker"
 	"github.com/OleksandrBesan/tatami/internal/git"
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // WorktreeMode represents the current mode of the worktree view
@@ -21,18 +21,24 @@ const (
 
 // WorktreeView displays the worktree picker
 type WorktreeView struct {
-	repoPath    string
-	worktrees   []git.Worktree
-	branches    []string
-	cursor      int
-	mode        WorktreeMode
-	branchInput textinput.Model
-	suggestions []string
-	suggCursor  int
-	deleteIndex      int
-	dockerResources  *docker.Resources
-	errorMsg         string
-	selected         *git.Worktree
+	repoPath        string
+	worktrees       []git.Worktree
+	branches        []string
+	cursor          int
+	mode            WorktreeMode
+	branchInput     textinput.Model
+	suggestions     []string
+	suggCursor      int
+	deleteIndex     int
+	dockerResources *docker.Resources
+	errorMsg        string
+	selected        *git.Worktree
+	mobileMode      bool
+}
+
+// SetMobileMode enables numbered, compact menu rendering.
+func (w *WorktreeView) SetMobileMode(enabled bool) {
+	w.mobileMode = enabled
 }
 
 // NewWorktreeView creates a new worktree view
@@ -94,6 +100,12 @@ func (w *WorktreeView) Update(msg tea.Msg) tea.Cmd {
 }
 
 func (w *WorktreeView) updateList(msg tea.KeyMsg) tea.Cmd {
+	if w.mobileMode {
+		if index, ok := numberKeyIndex(msg.String(), len(w.worktrees)+1); ok {
+			w.cursor = index
+			return nil
+		}
+	}
 	switch msg.String() {
 	case "j", "down":
 		// +1 for "Create new" option
@@ -284,10 +296,9 @@ func (w *WorktreeView) viewList() string {
 
 	// List existing worktrees
 	for i, wt := range w.worktrees {
-		cursor := "  "
+		cursor := choicePrefix(w.mobileMode, i, i == w.cursor)
 		style := normalStyle
 		if i == w.cursor {
-			cursor = "> "
 			style = selectedStyle
 		}
 
@@ -304,18 +315,20 @@ func (w *WorktreeView) viewList() string {
 	}
 
 	// "Create new" option
-	cursor := "  "
+	cursor := choicePrefix(w.mobileMode, len(w.worktrees), w.cursor == len(w.worktrees))
 	style := normalStyle
 	if w.cursor == len(w.worktrees) {
-		cursor = "> "
 		style = selectedStyle
 	}
 	b.WriteString(cursor + style.Render("+ Create new worktree") + "\n")
 
 	help := "\n[enter]select  [d]delete  [esc]back"
+	if w.mobileMode {
+		help = "\n[↑↓/1-9]select  [enter]open  [d]delete  [b]back"
+	}
 	b.WriteString(helpStyle.Render(help))
 
-	return boxStyle.Render(b.String())
+	return renderPanel(b.String(), w.mobileMode)
 }
 
 func (w *WorktreeView) viewCreate() string {
@@ -359,7 +372,7 @@ func (w *WorktreeView) viewCreate() string {
 	help := "\n[tab/arrows]suggestions  [enter]create  [esc]cancel"
 	b.WriteString(helpStyle.Render(help))
 
-	return boxStyle.Render(b.String())
+	return renderPanel(b.String(), w.mobileMode)
 }
 
 func (w *WorktreeView) viewConfirmDelete() string {
@@ -400,5 +413,5 @@ func (w *WorktreeView) viewConfirmDelete() string {
 		b.WriteString("[y]es  [n]o")
 	}
 
-	return boxStyle.Render(b.String())
+	return renderPanel(b.String(), w.mobileMode)
 }

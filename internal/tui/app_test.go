@@ -510,6 +510,124 @@ func TestDefaultModeStillShowsWorkspaceActions(t *testing.T) {
 	}
 }
 
+func TestMobileModeNumberSelectionRequiresEnterToOpen(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "first", Path: "/tmp/first"})
+	if err := store.Create(&workspace.Workspace{Name: "second", Path: "/tmp/second"}); err != nil {
+		t.Fatalf("create second workspace: %v", err)
+	}
+	app := NewApp(store, withoutHerdrSessions(), WithMobileMode())
+
+	model, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	updated := model.(*App)
+	if updated.currentView != ViewList || cmd != nil || updated.result != nil {
+		t.Fatalf("number selection opened immediately: view=%v result=%#v cmd=%T", updated.currentView, updated.result, cmd)
+	}
+	if selected := updated.listView.Selected(); selected == nil || selected.Name != "second" {
+		t.Fatalf("number selection chose %#v; want second", selected)
+	}
+
+	model, cmd = updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated = model.(*App)
+	if updated.currentView != ViewActions || cmd != nil {
+		t.Fatalf("enter after number selection opened view=%v cmd=%T; want actions", updated.currentView, cmd)
+	}
+	if !strings.Contains(updated.View(), "[1]") {
+		t.Fatalf("mobile action menu does not show numbered choices:\n%s", updated.View())
+	}
+}
+
+func TestMobileActionNumberSelectionStillRequiresEnter(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{
+		Name:   "project",
+		Path:   "/tmp/project",
+		Layout: workspace.Layout{Type: workspace.LayoutHerdr},
+	})
+	app := NewApp(store, withoutHerdrSessions(), WithMobileMode())
+
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated := model.(*App)
+	model, cmd := updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	updated = model.(*App)
+	if updated.currentView != ViewActions || cmd != nil || updated.result != nil {
+		t.Fatalf("numbered action executed immediately: view=%v result=%#v cmd=%T", updated.currentView, updated.result, cmd)
+	}
+	if got := updated.actionsView.Selected(); got != ActionWithTemplate {
+		t.Fatalf("numbered action selected %v; want ActionWithTemplate", got)
+	}
+
+	model, cmd = updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated = model.(*App)
+	if updated.currentView != ViewTemplates || cmd != nil || updated.result != nil {
+		t.Fatalf("enter after numbered action produced view=%v result=%#v cmd=%T", updated.currentView, updated.result, cmd)
+	}
+}
+
+func TestMobileBackReturnsFromMenuAndDoesNotQuitAtRoot(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "project", Path: "/tmp/project"})
+	app := NewApp(store, withoutHerdrSessions(), WithMobileMode())
+
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated := model.(*App)
+	model, cmd := updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	updated = model.(*App)
+	if updated.currentView != ViewList || cmd != nil {
+		t.Fatalf("mobile back from action menu produced view=%v cmd=%T", updated.currentView, cmd)
+	}
+
+	model, cmd = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	updated = model.(*App)
+	if updated.currentView != ViewList || cmd != nil || updated.result != nil {
+		t.Fatalf("mobile back at root quit or changed state: view=%v result=%#v cmd=%T", updated.currentView, updated.result, cmd)
+	}
+}
+
+func TestMobileBackKeyRemainsTextInsideCreateForm(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "project", Path: "/tmp/project"})
+	app := NewApp(store, withoutHerdrSessions(), WithMobileMode())
+
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	updated := model.(*App)
+	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	updated = model.(*App)
+	if updated.currentView != ViewCreate {
+		t.Fatalf("typing b in mobile create form navigated away: view=%v", updated.currentView)
+	}
+	if got := updated.createView.nameInput.Value(); got != "b" {
+		t.Fatalf("mobile create name = %q; want b", got)
+	}
+}
+
+func TestMobileBackLeavesFolderAndRemainsTextWhileFiltering(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{
+		Name:   "nested-project",
+		Path:   "/tmp/nested-project",
+		Folder: "team",
+	})
+	app := NewApp(store, withoutHerdrSessions(), WithMobileMode())
+
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated := model.(*App)
+	if updated.listView.CurrentFolder() != "team" {
+		t.Fatalf("enter selected folder %q; want team", updated.listView.CurrentFolder())
+	}
+	model, cmd := updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	updated = model.(*App)
+	if updated.listView.CurrentFolder() != "" || cmd != nil {
+		t.Fatalf("mobile back left folder=%q cmd=%T; want root", updated.listView.CurrentFolder(), cmd)
+	}
+	if selected := updated.listView.Selected(); selected == nil || selected.Type == "header" {
+		t.Fatalf("mobile back selected non-actionable row %#v", selected)
+	}
+
+	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	updated = model.(*App)
+	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	updated = model.(*App)
+	if !updated.listView.IsFiltering() || updated.listView.filter.Value() != "b" {
+		t.Fatalf("mobile filter after b: filtering=%v value=%q", updated.listView.IsFiltering(), updated.listView.filter.Value())
+	}
+}
+
 func newTestStore(t *testing.T, ws *workspace.Workspace) *workspace.Store {
 	t.Helper()
 
