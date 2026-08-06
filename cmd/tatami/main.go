@@ -17,25 +17,41 @@ import (
 
 var version = "dev"
 
-func main() {
-	newTabMode := false
-	for _, arg := range os.Args[1:] {
+type launchOptions struct {
+	newTabMode  bool
+	mobileMode  bool
+	showVersion bool
+}
+
+func parseLaunchOptions(args []string) launchOptions {
+	var options launchOptions
+	for _, arg := range args {
 		switch arg {
 		case "--version", "-v":
-			fmt.Printf("tatami %s\n", version)
-			return
+			options.showVersion = true
 		case "--new-tab":
-			newTabMode = true
+			options.newTabMode = true
+		case "--mobile":
+			options.mobileMode = true
 		}
 	}
+	return options
+}
 
-	if err := run(newTabMode); err != nil {
+func main() {
+	options := parseLaunchOptions(os.Args[1:])
+	if options.showVersion {
+		fmt.Printf("tatami %s\n", version)
+		return
+	}
+
+	if err := run(options.newTabMode, options.mobileMode); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(newTabMode bool) error {
+func run(newTabMode, mobileMode bool) error {
 	// Load config paths
 	paths, err := config.GetPaths()
 	if err != nil {
@@ -56,6 +72,9 @@ func run(newTabMode bool) error {
 	appOptions := []tui.AppOption{}
 	if newTabMode {
 		appOptions = append(appOptions, tui.WithNewTabMode())
+	}
+	if mobileMode {
+		appOptions = append(appOptions, tui.WithMobileMode())
 	}
 	app := tui.NewApp(store, appOptions...)
 

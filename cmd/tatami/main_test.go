@@ -200,3 +200,21 @@ func TestKittyConfigLaunchesNewTabMode(t *testing.T) {
 		}
 	}
 }
+
+func TestParseLaunchOptionsEnablesMobileAndNewTabModes(t *testing.T) {
+	options := parseLaunchOptions([]string{"--new-tab", "--mobile"})
+	if !options.newTabMode {
+		t.Fatal("--new-tab did not enable new-tab mode")
+	}
+	if !options.mobileMode {
+		t.Fatal("--mobile did not enable mobile mode")
+	}
+	if options.showVersion {
+		t.Fatal("ordinary launch options unexpectedly enabled version output")
+	}
+
+	versionOptions := parseLaunchOptions([]string{"-v"})
+	if !versionOptions.showVersion {
+		t.Fatal("-v did not enable version output")
+	}
+}

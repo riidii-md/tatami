@@ -24,11 +24,17 @@ const (
 
 // ActionView displays the action menu
 type ActionView struct {
-	workspace *workspace.Workspace
-	actions   []Action
-	cursor    int
-	inZellij  bool
-	inTmux    bool
+	workspace  *workspace.Workspace
+	actions    []Action
+	cursor     int
+	inZellij   bool
+	inTmux     bool
+	mobileMode bool
+}
+
+// SetMobileMode enables numbered, compact menu rendering.
+func (a *ActionView) SetMobileMode(enabled bool) {
+	a.mobileMode = enabled
 }
 
 // NewActionView creates a new action view
@@ -101,6 +107,12 @@ func (a *ActionView) Workspace() *workspace.Workspace {
 func (a *ActionView) Update(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if a.mobileMode {
+			if index, ok := numberKeyIndex(msg.String(), len(a.actions)); ok {
+				a.cursor = index
+				return nil
+			}
+		}
 		switch msg.String() {
 		case "j", "down":
 			if a.cursor < len(a.actions)-1 {
@@ -146,10 +158,9 @@ func (a *ActionView) View() string {
 	}
 
 	for i, action := range a.actions {
-		cursor := "  "
+		cursor := choicePrefix(a.mobileMode, i, i == a.cursor)
 		style := normalStyle
 		if i == a.cursor {
-			cursor = "> "
 			style = selectedStyle
 		}
 
@@ -162,7 +173,11 @@ func (a *ActionView) View() string {
 		b.WriteString("\n")
 	}
 
-	b.WriteString(helpStyle.Render("\n[enter]select  [esc]back"))
+	help := "\n[enter]select  [esc]back"
+	if a.mobileMode {
+		help = "\n[↑↓/1-9]select  [enter]open  [b]back"
+	}
+	b.WriteString(helpStyle.Render(help))
 
-	return boxStyle.Render(b.String())
+	return renderPanel(b.String(), a.mobileMode)
 }

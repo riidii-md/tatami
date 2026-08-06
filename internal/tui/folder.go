@@ -11,6 +11,12 @@ import (
 type FolderInput struct {
 	input      textinput.Model
 	parentPath string
+	mobileMode bool
+}
+
+// SetMobileMode enables compact input rendering.
+func (f *FolderInput) SetMobileMode(enabled bool) {
+	f.mobileMode = enabled
 }
 
 // NewFolderInput creates a new folder input
@@ -65,5 +71,5 @@ func (f *FolderInput) View() string {
 
 	b.WriteString(helpStyle.Render("[enter]create  [esc]cancel"))
 
-	return boxStyle.Render(b.String())
+	return renderPanel(b.String(), f.mobileMode)
 }
