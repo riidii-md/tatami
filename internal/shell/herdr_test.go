@@ -217,6 +217,42 @@ func TestHerdrRunWithLayoutInSessionUsesProjectSession(t *testing.T) {
 	}
 }
 
+func TestHerdrRunWithLayoutInCurrentSessionDoesNotAttachNestedClient(t *testing.T) {
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_SESSION", "tatami-project")
+	var commands [][]string
+	runner := NewHerdrRunnerWithRuntime(func(args ...string) ([]byte, error) {
+		commands = append(commands, append([]string(nil), args...))
+		switch len(commands) {
+		case 1:
+			return []byte(`{"running":true}`), nil
+		case 2:
+			return []byte(`{"result":{"workspaces":[]}}`), nil
+		case 3:
+			return []byte(`{"result":{"root_pane":{"pane_id":"w1:p1"}}}`), nil
+		default:
+			t.Fatalf("unexpected nested attach command: %#v", args)
+			return nil, nil
+		}
+	}, func(string) error {
+		t.Fatal("running Herdr session was started again")
+		return nil
+	})
+
+	ws := &workspace.Workspace{Name: "feature", Path: "/tmp/project-feature"}
+	if err := runner.RunWithLayoutInSession(ws, "tatami-project"); err != nil {
+		t.Fatalf("RunWithLayoutInSession returned error: %v", err)
+	}
+	want := [][]string{
+		{"--session", "tatami-project", "status", "server", "--json"},
+		{"--session", "tatami-project", "workspace", "list"},
+		{"--session", "tatami-project", "workspace", "create", "--cwd", "/tmp/project-feature", "--label", "feature", "--focus"},
+	}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("commands mismatch\ngot:  %#v\nwant: %#v", commands, want)
+	}
+}
+
 func TestHerdrAttachSession(t *testing.T) {
 	var commands [][]string
 	runner := NewHerdrRunnerWithRuntime(func(args ...string) ([]byte, error) {

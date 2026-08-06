@@ -312,6 +312,8 @@ When opening a Git worktree, choose one of two groupings:
 - **New Herdr session** keeps the existing behavior: the worktree uses its own `tatami-<branch>` session.
 - **Same project session** adds or focuses the worktree as another Herdr workspace inside the parent project's `tatami-<workspace>` session.
 
+When Tatami itself is launched from a Herdr pane, **Same project session** uses the current `HERDR_SESSION`. Tatami creates or focuses the selected worktree space and returns to the original pane without launching a nested Herdr client.
+
 The Tatami home page reads Herdr's session inventory and shows every known Herdr session with its running or stopped status. Select a session and press Enter to start or attach to it directly.
 
 This keeps Tatami responsible for selecting the local workspace while Herdr owns the agent panes, status, and control plane.

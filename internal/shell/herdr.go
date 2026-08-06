@@ -89,8 +89,7 @@ func (h *HerdrRunner) RunWithLayoutInSession(ws *workspace.Workspace, session st
 		if _, err := h.exec("--session", session, "workspace", "focus", existing); err != nil {
 			return fmt.Errorf("failed to focus herdr workspace %s: %w", existing, err)
 		}
-		_, err = h.exec("--session", session)
-		return err
+		return h.AttachSession(session)
 	}
 	rootPane, err := h.createWorkspace(session, ws)
 	if err != nil {
@@ -113,14 +112,16 @@ func (h *HerdrRunner) RunWithLayoutInSession(ws *workspace.Workspace, session st
 		}
 	}
 
-	_, err = h.exec("--session", session)
-	return err
+	return h.AttachSession(session)
 }
 
 // AttachSession attaches to a named Herdr session, starting it when necessary.
 func (h *HerdrRunner) AttachSession(session string) error {
 	if strings.TrimSpace(session) == "" {
 		return fmt.Errorf("herdr session name is required")
+	}
+	if os.Getenv("HERDR_ENV") == "1" && os.Getenv("HERDR_SESSION") == session {
+		return nil
 	}
 	_, err := h.exec("--session", session)
 	return err

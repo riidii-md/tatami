@@ -222,6 +222,9 @@ func herdrTarget(result *tui.Result) (*workspace.Workspace, bool) {
 
 func herdrSessionName(result *tui.Result, target *workspace.Workspace) string {
 	if result != nil && result.HerdrMode == tui.HerdrOpenShared && result.Workspace != nil {
+		if os.Getenv("HERDR_ENV") == "1" && strings.TrimSpace(os.Getenv("HERDR_SESSION")) != "" {
+			return os.Getenv("HERDR_SESSION")
+		}
 		return shell.SessionName(result.Workspace.Name)
 	}
 	return shell.SessionName(target.Name)

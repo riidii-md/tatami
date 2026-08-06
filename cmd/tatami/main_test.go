@@ -135,6 +135,18 @@ func TestHerdrSessionNameUsesDedicatedOrSharedMode(t *testing.T) {
 	}
 }
 
+func TestHerdrSharedModeUsesCurrentHerdrSession(t *testing.T) {
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_SESSION", "team-session")
+	parent := &workspace.Workspace{Name: "project", Layout: workspace.Layout{Type: workspace.LayoutHerdr}}
+	target := &workspace.Workspace{Name: "feature", Layout: workspace.Layout{Type: workspace.LayoutHerdr}}
+	result := &tui.Result{Workspace: parent, HerdrMode: tui.HerdrOpenShared}
+
+	if got := herdrSessionName(result, target); got != "team-session" {
+		t.Fatalf("shared in-Herdr session = %q; want team-session", got)
+	}
+}
+
 func TestHerdrTargetUsesSelectedTemplate(t *testing.T) {
 	ws := &workspace.Workspace{
 		Name:   "project",
