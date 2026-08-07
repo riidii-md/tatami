@@ -38,6 +38,10 @@ For `cd` to work in the current terminal, add to `~/.zshrc` or `~/.bashrc`:
 
 ```bash
 tatami() {
+  if [[ "$1" == "run" || "$1" == "agents" ]]; then
+    command tatami "$@"
+    return $?
+  fi
   local tmp exit_code output
   tmp=$(mktemp)
   TATAMI_WRAPPER=1 command tatami "$@" > "$tmp"
@@ -105,6 +109,34 @@ Mobile mode shows numbered choices, keeps `Enter` as confirmation, adds `b` as
 a safe Back key outside text fields, hides paths on the home screen, and removes
 decorative menu borders. See [Mobile navigation with Termius](docs/mobile-navigation.md)
 for the recommended Termius shortcut bar and Startup Command.
+
+### Agent session tracking
+
+Use `tatami run` when you want Tatami to track the lifecycle and terminal
+location of an AI CLI while preserving its normal interactive terminal:
+
+```bash
+tatami run claude
+tatami run codex
+tatami run gemini
+
+tatami agents list
+tatami agents status <id>
+tatami agents prune
+```
+
+Tatami records the agent name, working directory, PID, lifecycle timestamps,
+exit code, and available Zellij, tmux, Herdr, or Kitty context. It deliberately
+does not store command arguments or terminal transcripts because they can
+contain prompts, source code, and secrets.
+
+Runtime records live as private per-session JSON files under
+`$XDG_STATE_HOME/tatami/agents` (or `~/.local/state/tatami/agents`). Separate
+files keep simultaneous agent starts from overwriting each other.
+
+Herdr-backed layouts continue to launch known AI commands through Herdr's own
+agent control plane. Use `tatami run` for agents launched manually in a shell,
+Zellij/tmux pane, or Kitty window.
 
 ## Features
 

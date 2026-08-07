@@ -189,6 +189,8 @@ func TestHerdrDestinationBackReturnsToReusableWorktreeList(t *testing.T) {
 }
 
 func TestHerdrWorktreeCanOpenInChosenExistingSession(t *testing.T) {
+	t.Setenv("HERDR_ENV", "")
+	t.Setenv("HERDR_SESSION", "")
 	ws := &workspace.Workspace{
 		Name:   "agents",
 		Path:   newGitRepo(t),

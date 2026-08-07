@@ -1,12 +1,18 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
+	"text/tabwriter"
+	"time"
 
+	"github.com/OleksandrBesan/tatami/internal/agent"
 	"github.com/OleksandrBesan/tatami/internal/config"
 	"github.com/OleksandrBesan/tatami/internal/shell"
 	"github.com/OleksandrBesan/tatami/internal/tui"
@@ -39,16 +45,37 @@ func parseLaunchOptions(args []string) launchOptions {
 }
 
 func main() {
-	options := parseLaunchOptions(os.Args[1:])
+	os.Exit(runCLI(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func runCLI(args []string, out, errOut io.Writer) int {
+	if len(args) > 0 && (args[0] == "run" || args[0] == "agents") {
+		paths, err := config.GetPaths()
+		if err == nil {
+			err = handleTopLevelCommand(args, paths, os.Stdin, out, errOut)
+		}
+		if err != nil {
+			var exitErr *trackedAgentExitError
+			if errors.As(err, &exitErr) {
+				return exitErr.code
+			}
+			fmt.Fprintf(errOut, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	options := parseLaunchOptions(args)
 	if options.showVersion {
-		fmt.Printf("tatami %s\n", version)
-		return
+		fmt.Fprintf(out, "tatami %s\n", version)
+		return 0
 	}
 
 	if err := run(options.newTabMode, options.mobileMode); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(errOut, "Error: %v\n", err)
+		return 1
 	}
+	return 0
 }
 
 func run(newTabMode, mobileMode bool) error {
@@ -109,6 +136,212 @@ func run(newTabMode, mobileMode bool) error {
 	}
 
 	return handleResult(result, newTabMode)
+}
+
+func handleTopLevelCommand(args []string, paths *config.Paths, in io.Reader, out, errOut io.Writer) error {
+	switch args[0] {
+	case "run":
+		if len(args) < 2 {
+			return errors.New("usage: tatami run <agent> [args...]")
+		}
+		return runTrackedAgent(paths, args[1], args[2:], in, out, errOut)
+	case "agents":
+		return handleAgentsCommand(paths, args[1:], out)
+	default:
+		return fmt.Errorf("unknown command %q", args[0])
+	}
+}
+
+func handleAgentsCommand(paths *config.Paths, args []string, out io.Writer) error {
+	command := "list"
+	if len(args) > 0 {
+		command = args[0]
+	}
+	store := agent.NewStore(paths.AgentsDir)
+	switch command {
+	case "list", "ls":
+		return printAgents(store, out)
+	case "status":
+		if len(args) < 2 {
+			return errors.New("usage: tatami agents status <id>")
+		}
+		if _, err := store.PruneStale(); err != nil {
+			return err
+		}
+		session, err := store.Get(args[1])
+		if err != nil {
+			return err
+		}
+		return printAgentDetail(session, out)
+	case "prune":
+		changed, err := store.PruneStale()
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "marked %d stale agent session(s)\n", changed)
+		return nil
+	default:
+		return fmt.Errorf("unknown agents command %q", command)
+	}
+}
+
+func runTrackedAgent(paths *config.Paths, agentName string, args []string, in io.Reader, out, errOut io.Writer) error {
+	binary, err := exec.LookPath(agentName)
+	if err != nil {
+		return fmt.Errorf("%s not found in PATH: %w", agentName, err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("get current directory: %w", err)
+	}
+	command := exec.Command(binary, args...)
+	command.Stdin = in
+	command.Stdout = out
+	command.Stderr = errOut
+	command.Env = os.Environ()
+	command.Dir = cwd
+	if err := command.Start(); err != nil {
+		return fmt.Errorf("start %s: %w", agentName, err)
+	}
+
+	session := agent.NewSession(filepath.Base(agentName), cwd, agent.DetectContext())
+	session.PID = command.Process.Pid
+	store := agent.NewStore(paths.AgentsDir)
+	if err := store.Create(session); err != nil {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+		return fmt.Errorf("record agent start: %w", err)
+	}
+
+	waitErr := command.Wait()
+	now := time.Now().UTC()
+	session.EndedAt = &now
+	session.Status = agent.StatusExited
+	exitCode := 0
+	if waitErr != nil {
+		exitCode = 1
+		var processErr *exec.ExitError
+		if errors.As(waitErr, &processErr) {
+			exitCode = processExitCode(processErr)
+		}
+	}
+	session.ExitCode = &exitCode
+	if err := store.Update(session); err != nil {
+		return fmt.Errorf("record agent exit: %w", err)
+	}
+	if waitErr == nil {
+		return nil
+	}
+	var processErr *exec.ExitError
+	if errors.As(waitErr, &processErr) {
+		return &trackedAgentExitError{code: exitCode, err: waitErr}
+	}
+	return fmt.Errorf("wait for %s: %w", agentName, waitErr)
+}
+
+type trackedAgentExitError struct {
+	code int
+	err  error
+}
+
+func (e *trackedAgentExitError) Error() string { return e.err.Error() }
+func (e *trackedAgentExitError) Unwrap() error { return e.err }
+
+func processExitCode(exitErr *exec.ExitError) int {
+	if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+		return 128 + int(status.Signal())
+	}
+	if code := exitErr.ExitCode(); code >= 0 {
+		return code
+	}
+	return 1
+}
+
+func printAgents(store *agent.Store, out io.Writer) error {
+	if _, err := store.PruneStale(); err != nil {
+		return err
+	}
+	sessions, err := store.List()
+	if err != nil {
+		return err
+	}
+	if len(sessions) == 0 {
+		fmt.Fprintln(out, "No tracked AI agent sessions yet. Start one with: tatami run claude")
+		return nil
+	}
+	table := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(table, "ID\tAGENT\tSTATUS\tMUX\tLOCATION\tPID\tAGE\tCWD")
+	for _, session := range sessions {
+		fmt.Fprintf(
+			table,
+			"%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
+			shortAgentID(session.ID),
+			session.Agent,
+			session.Status,
+			session.Context.Mux,
+			agentLocation(session.Context),
+			session.PID,
+			agentAge(session.StartedAt),
+			session.Cwd,
+		)
+	}
+	return table.Flush()
+}
+
+func printAgentDetail(session *agent.Session, out io.Writer) error {
+	fmt.Fprintf(out, "ID:      %s\n", session.ID)
+	fmt.Fprintf(out, "Agent:   %s\n", session.Agent)
+	fmt.Fprintf(out, "Status:  %s\n", session.Status)
+	fmt.Fprintf(out, "PID:     %d\n", session.PID)
+	fmt.Fprintf(out, "Mux:     %s\n", session.Context.Mux)
+	if location := agentLocation(session.Context); location != "" {
+		fmt.Fprintf(out, "Session: %s\n", location)
+	}
+	fmt.Fprintf(out, "Cwd:     %s\n", session.Cwd)
+	fmt.Fprintf(out, "Started: %s\n", session.StartedAt.Format(time.RFC3339))
+	if session.EndedAt != nil {
+		fmt.Fprintf(out, "Ended:   %s\n", session.EndedAt.Format(time.RFC3339))
+	}
+	if session.ExitCode != nil {
+		fmt.Fprintf(out, "Exit:    %d\n", *session.ExitCode)
+	}
+	return nil
+}
+
+func agentLocation(context agent.Context) string {
+	switch context.Mux {
+	case "herdr":
+		return context.HerdrSession
+	case "zellij":
+		return strings.Trim(strings.Join([]string{context.ZellijSession, context.ZellijPaneID}, "/"), "/")
+	case "tmux":
+		parts := make([]string, 0, 3)
+		for _, part := range []string{context.TmuxSession, context.TmuxWindow, context.TmuxPane} {
+			if part != "" {
+				parts = append(parts, part)
+			}
+		}
+		return strings.Join(parts, ":")
+	case "kitty":
+		return context.KittyWindowID
+	default:
+		return context.TTY
+	}
+}
+
+func shortAgentID(id string) string {
+	if len(id) <= 12 {
+		return id
+	}
+	return id[:12]
+}
+
+func agentAge(startedAt time.Time) string {
+	age := time.Since(startedAt).Round(time.Second)
+	if age < 0 {
+		return "0s"
+	}
+	return age.String()
 }
 
 func copyToClipboard(text string) error {
