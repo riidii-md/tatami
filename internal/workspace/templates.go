@@ -95,13 +95,13 @@ func GetTemplates() []Template {
 		{
 			Name:        "claude",
 			Description: "claude fullscreen",
-			MainCmd:     "tatami run claude",
+			MainCmd:     "claude",
 			Panes:       []Pane{},
 		},
 		{
 			Name:        "claude-left",
 			Description: "claude LEFT, term RIGHT",
-			MainCmd:     "tatami run claude",
+			MainCmd:     "claude",
 			Panes: []Pane{
 				{Command: "", Direction: "right"},
 			},
@@ -109,7 +109,7 @@ func GetTemplates() []Template {
 		{
 			Name:        "claude-left-nvim",
 			Description: "claude LEFT, nvim RIGHT",
-			MainCmd:     "tatami run claude",
+			MainCmd:     "claude",
 			Panes: []Pane{
 				{Command: "nvim", Direction: "right"},
 			},
@@ -119,7 +119,7 @@ func GetTemplates() []Template {
 			Description: "nvim LEFT, claude RIGHT",
 			MainCmd:     "nvim",
 			Panes: []Pane{
-				{Command: "tatami run claude", Direction: "right"},
+				{Command: "claude", Direction: "right"},
 			},
 		},
 		{
@@ -127,7 +127,7 @@ func GetTemplates() []Template {
 			Description: "nvim LEFT, claude RIGHT TOP, term RIGHT BOTTOM",
 			MainCmd:     "nvim",
 			Panes: []Pane{
-				{Command: "tatami run claude", Direction: "right"},
+				{Command: "claude", Direction: "right"},
 				{Command: "", Direction: "down"},
 			},
 		},
@@ -136,7 +136,7 @@ func GetTemplates() []Template {
 			Description: "nvim LEFT, stacked [claude|term] RIGHT",
 			MainCmd:     "nvim",
 			Panes: []Pane{
-				{Command: "tatami run claude", Direction: "right"},
+				{Command: "claude", Direction: "right"},
 				{Command: "", Direction: "stack"},
 			},
 		},
@@ -146,27 +146,27 @@ func GetTemplates() []Template {
 			MainCmd:     "nvim",
 			Panes: []Pane{
 				{Command: "", Direction: "right"},
-				{Command: "tatami run claude", Direction: "stack"},
+				{Command: "claude", Direction: "stack"},
 			},
 		},
 		{
 			Name:        "term-left-claude",
 			Description: "term LEFT, claude RIGHT",
 			Panes: []Pane{
-				{Command: "tatami run claude", Direction: "right"},
+				{Command: "claude", Direction: "right"},
 			},
 		},
 		// AI assistant layouts - Gemini
 		{
 			Name:        "gemini",
 			Description: "gemini fullscreen",
-			MainCmd:     "tatami run gemini",
+			MainCmd:     "gemini",
 			Panes:       []Pane{},
 		},
 		{
 			Name:        "gemini-left",
 			Description: "gemini LEFT, term RIGHT",
-			MainCmd:     "tatami run gemini",
+			MainCmd:     "gemini",
 			Panes: []Pane{
 				{Command: "", Direction: "right"},
 			},
@@ -176,20 +176,20 @@ func GetTemplates() []Template {
 			Description: "nvim LEFT, gemini RIGHT",
 			MainCmd:     "nvim",
 			Panes: []Pane{
-				{Command: "tatami run gemini", Direction: "right"},
+				{Command: "gemini", Direction: "right"},
 			},
 		},
 		// AI assistant layouts - Codex
 		{
 			Name:        "codex",
 			Description: "codex fullscreen",
-			MainCmd:     "tatami run codex",
+			MainCmd:     "codex",
 			Panes:       []Pane{},
 		},
 		{
 			Name:        "codex-left",
 			Description: "codex LEFT, term RIGHT",
-			MainCmd:     "tatami run codex",
+			MainCmd:     "codex",
 			Panes: []Pane{
 				{Command: "", Direction: "right"},
 			},
@@ -199,7 +199,7 @@ func GetTemplates() []Template {
 			Description: "nvim LEFT, codex RIGHT",
 			MainCmd:     "nvim",
 			Panes: []Pane{
-				{Command: "tatami run codex", Direction: "right"},
+				{Command: "codex", Direction: "right"},
 			},
 		},
 	}

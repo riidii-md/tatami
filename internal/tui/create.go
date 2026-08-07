@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/OleksandrBesan/tatami/internal/workspace"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/OleksandrBesan/tatami/internal/workspace"
 )
 
 type createField int
@@ -38,6 +38,12 @@ type CreateView struct {
 	editing     bool
 	editingName string
 	errorMsg    string
+	mobileMode  bool
+}
+
+// SetMobileMode enables compact form rendering.
+func (c *CreateView) SetMobileMode(enabled bool) {
+	c.mobileMode = enabled
 }
 
 // NewCreateView creates a new create view
@@ -70,7 +76,7 @@ func NewCreateView() *CreateView {
 		sshKeyInput:     sshKeyInput,
 		folderInput:     folderInput,
 		layoutType:      workspace.LayoutNone,
-		layoutTypes:     []workspace.LayoutType{workspace.LayoutNone, workspace.LayoutZellij, workspace.LayoutTmux},
+		layoutTypes:     []workspace.LayoutType{workspace.LayoutNone, workspace.LayoutZellij, workspace.LayoutTmux, workspace.LayoutHerdr},
 		activeField:     fieldName,
 		editing:         false,
 	}
@@ -422,5 +428,5 @@ func (c *CreateView) View() string {
 	}
 	b.WriteString(helpStyle.Render(help))
 
-	return boxStyle.Render(b.String())
+	return renderPanel(b.String(), c.mobileMode)
 }

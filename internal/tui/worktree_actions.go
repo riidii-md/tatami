@@ -3,9 +3,9 @@ package tui
 import (
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/OleksandrBesan/tatami/internal/git"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // WorktreeAction represents an action for opening a worktree
@@ -19,10 +19,16 @@ const (
 
 // WorktreeActionView displays actions for opening a worktree
 type WorktreeActionView struct {
-	worktree  *git.Worktree
-	workspace *workspace.Workspace
-	actions   []WorktreeAction
-	cursor    int
+	worktree   *git.Worktree
+	workspace  *workspace.Workspace
+	actions    []WorktreeAction
+	cursor     int
+	mobileMode bool
+}
+
+// SetMobileMode enables numbered, compact menu rendering.
+func (v *WorktreeActionView) SetMobileMode(enabled bool) {
+	v.mobileMode = enabled
 }
 
 // NewWorktreeActionView creates a new worktree action view
@@ -67,6 +73,12 @@ func (v *WorktreeActionView) Workspace() *workspace.Workspace {
 func (v *WorktreeActionView) Update(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if v.mobileMode {
+			if index, ok := numberKeyIndex(msg.String(), len(v.actions)); ok {
+				v.cursor = index
+				return nil
+			}
+		}
 		switch msg.String() {
 		case "j", "down":
 			if v.cursor < len(v.actions)-1 {
@@ -99,10 +111,9 @@ func (v *WorktreeActionView) View() string {
 	}
 
 	for i, action := range v.actions {
-		cursor := "  "
+		cursor := choicePrefix(v.mobileMode, i, i == v.cursor)
 		style := normalStyle
 		if i == v.cursor {
-			cursor = "> "
 			style = selectedStyle
 		}
 
@@ -112,7 +123,11 @@ func (v *WorktreeActionView) View() string {
 		b.WriteString("\n")
 	}
 
-	b.WriteString(helpStyle.Render("\n[enter]select  [esc]back"))
+	help := "\n[enter]select  [esc]back"
+	if v.mobileMode {
+		help = "\n[↑↓/1-9]select  [enter]open  [b]back"
+	}
+	b.WriteString(helpStyle.Render(help))
 
-	return boxStyle.Render(b.String())
+	return renderPanel(b.String(), v.mobileMode)
 }

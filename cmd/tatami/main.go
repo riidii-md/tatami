@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -22,27 +23,66 @@ import (
 
 var version = "dev"
 
-func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
-		fmt.Printf("tatami %s\n", version)
-		return
-	}
-
-	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
+type launchOptions struct {
+	newTabMode  bool
+	mobileMode  bool
+	showVersion bool
 }
 
-func run() error {
+func parseLaunchOptions(args []string) launchOptions {
+	var options launchOptions
+	for _, arg := range args {
+		switch arg {
+		case "--version", "-v":
+			options.showVersion = true
+		case "--new-tab":
+			options.newTabMode = true
+		case "--mobile", "-m":
+			options.mobileMode = true
+		}
+	}
+	return options
+}
+
+func main() {
+	os.Exit(runCLI(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func runCLI(args []string, out, errOut io.Writer) int {
+	if len(args) > 0 && (args[0] == "run" || args[0] == "agents") {
+		paths, err := config.GetPaths()
+		if err == nil {
+			err = handleTopLevelCommand(args, paths, os.Stdin, out, errOut)
+		}
+		if err != nil {
+			var exitErr *trackedAgentExitError
+			if errors.As(err, &exitErr) {
+				return exitErr.code
+			}
+			fmt.Fprintf(errOut, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	options := parseLaunchOptions(args)
+	if options.showVersion {
+		fmt.Fprintf(out, "tatami %s\n", version)
+		return 0
+	}
+
+	if err := run(options.newTabMode, options.mobileMode); err != nil {
+		fmt.Fprintf(errOut, "Error: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func run(newTabMode, mobileMode bool) error {
 	// Load config paths
 	paths, err := config.GetPaths()
 	if err != nil {
 		return fmt.Errorf("failed to get config paths: %w", err)
-	}
-
-	if handled, err := handleTopLevelCommand(os.Args[1:], paths, os.Stdout, os.Stderr); handled || err != nil {
-		return err
 	}
 
 	// Initialize workspace store
@@ -56,7 +96,14 @@ func run() error {
 	lipgloss.SetHasDarkBackground(true)
 
 	// Create and run the TUI app
-	app := tui.NewApp(store)
+	appOptions := []tui.AppOption{}
+	if newTabMode {
+		appOptions = append(appOptions, tui.WithNewTabMode())
+	}
+	if mobileMode {
+		appOptions = append(appOptions, tui.WithMobileMode())
+	}
+	app := tui.NewApp(store, appOptions...)
 
 	// When running inside the shell wrapper (TATAMI_WRAPPER=1), stdout is redirected
 	// to a temp file to capture the result path. We must attach the TUI to /dev/tty
@@ -88,40 +135,38 @@ func run() error {
 		return nil
 	}
 
-	return handleResult(result)
+	return handleResult(result, newTabMode)
 }
 
-func handleTopLevelCommand(args []string, paths *config.Paths, out, errOut io.Writer) (bool, error) {
-	if len(args) == 0 {
-		return false, nil
-	}
+func handleTopLevelCommand(args []string, paths *config.Paths, in io.Reader, out, errOut io.Writer) error {
 	switch args[0] {
 	case "run":
 		if len(args) < 2 {
-			return true, errors.New("usage: tatami run <agent> [args...]")
+			return errors.New("usage: tatami run <agent> [args...]")
 		}
-		return true, runTrackedAgent(paths, args[1], args[2:])
+		return runTrackedAgent(paths, args[1], args[2:], in, out, errOut)
 	case "agents":
-		return true, handleAgentsCommand(paths, args[1:], out)
-	case "dashboard", "dash":
-		return true, renderDashboard(paths, out)
+		return handleAgentsCommand(paths, args[1:], out)
 	default:
-		return false, nil
+		return fmt.Errorf("unknown command %q", args[0])
 	}
 }
 
 func handleAgentsCommand(paths *config.Paths, args []string, out io.Writer) error {
-	cmd := "list"
+	command := "list"
 	if len(args) > 0 {
-		cmd = args[0]
+		command = args[0]
 	}
-	store := agent.NewStore(paths.AgentsFile)
-	switch cmd {
+	store := agent.NewStore(paths.AgentsDir)
+	switch command {
 	case "list", "ls":
 		return printAgents(store, out)
 	case "status":
 		if len(args) < 2 {
 			return errors.New("usage: tatami agents status <id>")
+		}
+		if _, err := store.PruneStale(); err != nil {
+			return err
 		}
 		session, err := store.Get(args[1])
 		if err != nil {
@@ -135,68 +180,87 @@ func handleAgentsCommand(paths *config.Paths, args []string, out io.Writer) erro
 		}
 		fmt.Fprintf(out, "marked %d stale agent session(s)\n", changed)
 		return nil
-	case "focus", "open":
-		if len(args) < 2 {
-			return errors.New("usage: tatami agents focus <id>")
-		}
-		session, err := store.Get(args[1])
-		if err != nil {
-			return err
-		}
-		return focusAgent(session, out)
 	default:
-		return fmt.Errorf("unknown agents command %q", cmd)
+		return fmt.Errorf("unknown agents command %q", command)
 	}
 }
 
-func runTrackedAgent(paths *config.Paths, agentName string, args []string) error {
+func runTrackedAgent(paths *config.Paths, agentName string, args []string, in io.Reader, out, errOut io.Writer) error {
 	binary, err := exec.LookPath(agentName)
 	if err != nil {
 		return fmt.Errorf("%s not found in PATH: %w", agentName, err)
 	}
-	cwd, _ := os.Getwd()
-	store := agent.NewStore(paths.AgentsFile)
-	session := agent.NewSession(agentName, args, cwd, agent.DetectContext())
-	cmd := exec.Command(binary, args...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Env = os.Environ()
-	cmd.Dir = cwd
-
-	if err := cmd.Start(); err != nil {
-		return err
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("get current directory: %w", err)
 	}
-	session.PID = cmd.Process.Pid
+	command := exec.Command(binary, args...)
+	command.Stdin = in
+	command.Stdout = out
+	command.Stderr = errOut
+	command.Env = os.Environ()
+	command.Dir = cwd
+	if err := command.Start(); err != nil {
+		return fmt.Errorf("start %s: %w", agentName, err)
+	}
+
+	session := agent.NewSession(filepath.Base(agentName), cwd, agent.DetectContext())
+	session.PID = command.Process.Pid
+	store := agent.NewStore(paths.AgentsDir)
 	if err := store.Create(session); err != nil {
-		_ = cmd.Process.Kill()
-		return err
+		_ = command.Process.Kill()
+		_ = command.Wait()
+		return fmt.Errorf("record agent start: %w", err)
 	}
 
-	runErr := cmd.Wait()
+	waitErr := command.Wait()
 	now := time.Now().UTC()
 	session.EndedAt = &now
 	session.Status = agent.StatusExited
 	exitCode := 0
-	if runErr != nil {
+	if waitErr != nil {
 		exitCode = 1
-		var exitErr *exec.ExitError
-		if errors.As(runErr, &exitErr) {
-			exitCode = exitErr.ExitCode()
+		var processErr *exec.ExitError
+		if errors.As(waitErr, &processErr) {
+			exitCode = processExitCode(processErr)
 		}
 	}
 	session.ExitCode = &exitCode
 	if err := store.Update(session); err != nil {
-		return err
+		return fmt.Errorf("record agent exit: %w", err)
 	}
-	if runErr != nil {
-		return runErr
+	if waitErr == nil {
+		return nil
 	}
-	return nil
+	var processErr *exec.ExitError
+	if errors.As(waitErr, &processErr) {
+		return &trackedAgentExitError{code: exitCode, err: waitErr}
+	}
+	return fmt.Errorf("wait for %s: %w", agentName, waitErr)
+}
+
+type trackedAgentExitError struct {
+	code int
+	err  error
+}
+
+func (e *trackedAgentExitError) Error() string { return e.err.Error() }
+func (e *trackedAgentExitError) Unwrap() error { return e.err }
+
+func processExitCode(exitErr *exec.ExitError) int {
+	if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+		return 128 + int(status.Signal())
+	}
+	if code := exitErr.ExitCode(); code >= 0 {
+		return code
+	}
+	return 1
 }
 
 func printAgents(store *agent.Store, out io.Writer) error {
-	_, _ = store.PruneStale()
+	if _, err := store.PruneStale(); err != nil {
+		return err
+	}
 	sessions, err := store.List()
 	if err != nil {
 		return err
@@ -205,152 +269,79 @@ func printAgents(store *agent.Store, out io.Writer) error {
 		fmt.Fprintln(out, "No tracked AI agent sessions yet. Start one with: tatami run claude")
 		return nil
 	}
-	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tAGENT\tSTATUS\tMUX\tPANE\tPID\tAGE\tCWD")
-	for _, s := range sessions {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n", shortID(s.ID), s.Agent, s.Status, s.Context.Mux, paneLabel(s), s.PID, age(s.StartedAt), s.Cwd)
+	table := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(table, "ID\tAGENT\tSTATUS\tMUX\tLOCATION\tPID\tAGE\tCWD")
+	for _, session := range sessions {
+		fmt.Fprintf(
+			table,
+			"%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
+			shortAgentID(session.ID),
+			session.Agent,
+			session.Status,
+			session.Context.Mux,
+			agentLocation(session.Context),
+			session.PID,
+			agentAge(session.StartedAt),
+			session.Cwd,
+		)
 	}
-	return tw.Flush()
+	return table.Flush()
 }
 
-func printAgentDetail(s *agent.Session, out io.Writer) error {
-	fmt.Fprintf(out, "ID:      %s\n", s.ID)
-	fmt.Fprintf(out, "Agent:   %s\n", s.Agent)
-	fmt.Fprintf(out, "Status:  %s\n", s.Status)
-	fmt.Fprintf(out, "PID:     %d\n", s.PID)
-	fmt.Fprintf(out, "Mux:     %s\n", s.Context.Mux)
-	fmt.Fprintf(out, "Pane:    %s\n", paneLabel(s))
-	fmt.Fprintf(out, "Cwd:     %s\n", s.Cwd)
-	fmt.Fprintf(out, "Started: %s\n", s.StartedAt.Format(time.RFC3339))
-	if s.EndedAt != nil {
-		fmt.Fprintf(out, "Ended:   %s\n", s.EndedAt.Format(time.RFC3339))
+func printAgentDetail(session *agent.Session, out io.Writer) error {
+	fmt.Fprintf(out, "ID:      %s\n", session.ID)
+	fmt.Fprintf(out, "Agent:   %s\n", session.Agent)
+	fmt.Fprintf(out, "Status:  %s\n", session.Status)
+	fmt.Fprintf(out, "PID:     %d\n", session.PID)
+	fmt.Fprintf(out, "Mux:     %s\n", session.Context.Mux)
+	if location := agentLocation(session.Context); location != "" {
+		fmt.Fprintf(out, "Session: %s\n", location)
+	}
+	fmt.Fprintf(out, "Cwd:     %s\n", session.Cwd)
+	fmt.Fprintf(out, "Started: %s\n", session.StartedAt.Format(time.RFC3339))
+	if session.EndedAt != nil {
+		fmt.Fprintf(out, "Ended:   %s\n", session.EndedAt.Format(time.RFC3339))
+	}
+	if session.ExitCode != nil {
+		fmt.Fprintf(out, "Exit:    %d\n", *session.ExitCode)
 	}
 	return nil
 }
 
-func renderDashboard(paths *config.Paths, out io.Writer) error {
-	store := agent.NewStore(paths.AgentsFile)
-	_, _ = store.PruneStale()
-	sessions, err := store.List()
-	if err != nil {
-		return err
-	}
-	wsStore, err := workspace.NewStore(paths)
-	if err != nil {
-		return err
-	}
-	workspaces := wsStore.List()
-
-	fmt.Fprintln(out, "Tatami Dashboard")
-	fmt.Fprintln(out, "")
-	fmt.Fprintln(out, "┌─ AI Agents ─────────────────────────────┬─ Notifications / Agent Detail ─────────────┐")
-	if len(sessions) == 0 {
-		fmt.Fprintln(out, "│ no tracked agents                        │ start one: tatami run claude               │")
-	} else {
-		for i, s := range sessions {
-			right := ""
-			if i == 0 {
-				right = fmt.Sprintf("Status: %s  Mux: %s  Pane: %s", s.Status, s.Context.Mux, paneLabel(s))
-			}
-			fmt.Fprintf(out, "│ %-39s │ %-43s │\n", fmt.Sprintf("%s %s %s", shortID(s.ID), s.Agent, s.Cwd), right)
-		}
-	}
-	fmt.Fprintln(out, "├─ Workspaces ─────────────────────────────┼─────────────────────────────────────────────┤")
-	if len(workspaces) == 0 {
-		fmt.Fprintln(out, "│ no workspaces                            │                                             │")
-	} else {
-		limit := len(workspaces)
-		if limit > 8 {
-			limit = 8
-		}
-		for i := 0; i < limit; i++ {
-			fmt.Fprintf(out, "│ %-39s │ %-43s │\n", workspaces[i].Name, "")
-		}
-	}
-	fmt.Fprintln(out, "├─ Zellij Sessions ────────────────────────┼─────────────────────────────────────────────┤")
-	fmt.Fprintln(out, "│ use existing Tatami zellij session view  │ exact pane focus depends on zellij support  │")
-	fmt.Fprintln(out, "├─ Tmux Sessions ──────────────────────────┼─────────────────────────────────────────────┤")
-	fmt.Fprintln(out, "│ tatami agents focus <id> can target tmux │ enter/focus action maps here                │")
-	fmt.Fprintln(out, "└──────────────────────────────────────────┴─────────────────────────────────────────────┘")
-	return nil
-}
-
-func focusAgent(s *agent.Session, out io.Writer) error {
-	switch s.Context.Mux {
-	case "tmux":
-		if s.Context.TmuxSession == "" && s.Context.TmuxPane == "" {
-			return errors.New("tmux session has no target metadata")
-		}
-		if s.Context.TmuxSession != "" {
-			if err := exec.Command("tmux", "switch-client", "-t", s.Context.TmuxSession).Run(); err != nil {
-				return err
-			}
-		}
-		if s.Context.TmuxWindow != "" {
-			_ = exec.Command("tmux", "select-window", "-t", s.Context.TmuxWindow).Run()
-		}
-		if s.Context.TmuxPane != "" {
-			_ = exec.Command("tmux", "select-pane", "-t", s.Context.TmuxPane).Run()
-		}
-		fmt.Fprintf(out, "focused tmux agent %s\n", shortID(s.ID))
-		return nil
+func agentLocation(context agent.Context) string {
+	switch context.Mux {
+	case "herdr":
+		return context.HerdrSession
 	case "zellij":
-		fmt.Fprintf(out, "zellij agent %s is in session=%q pane=%q; attach/focus through zellij for now\n", shortID(s.ID), s.Context.ZellijSession, s.Context.ZellijPaneID)
-		return nil
-	default:
-		return fmt.Errorf("agent %s was not started inside zellij/tmux", shortID(s.ID))
-	}
-}
-
-func paneLabel(s *agent.Session) string {
-	if s.Context.Mux == "zellij" {
-		return s.Context.ZellijPaneID
-	}
-	if s.Context.Mux == "tmux" {
-		parts := []string{}
-		if s.Context.TmuxSession != "" {
-			parts = append(parts, s.Context.TmuxSession)
-		}
-		if s.Context.TmuxWindow != "" {
-			parts = append(parts, s.Context.TmuxWindow)
-		}
-		if s.Context.TmuxPane != "" {
-			parts = append(parts, s.Context.TmuxPane)
+		return strings.Trim(strings.Join([]string{context.ZellijSession, context.ZellijPaneID}, "/"), "/")
+	case "tmux":
+		parts := make([]string, 0, 3)
+		for _, part := range []string{context.TmuxSession, context.TmuxWindow, context.TmuxPane} {
+			if part != "" {
+				parts = append(parts, part)
+			}
 		}
 		return strings.Join(parts, ":")
+	case "kitty":
+		return context.KittyWindowID
+	default:
+		return context.TTY
 	}
-	return ""
 }
 
-func shortID(id string) string {
-	if len(id) <= 18 {
+func shortAgentID(id string) string {
+	if len(id) <= 12 {
 		return id
 	}
-	return id[:18]
+	return id[:12]
 }
 
-func age(t time.Time) string {
-	d := time.Since(t).Round(time.Second)
-	if d < 0 {
-		d = 0
+func agentAge(startedAt time.Time) string {
+	age := time.Since(startedAt).Round(time.Second)
+	if age < 0 {
+		return "0s"
 	}
-	return d.String()
-}
-
-func isKnownAgentCommand(command string) bool {
-	fields := strings.Fields(command)
-	if len(fields) == 0 {
-		return false
-	}
-	if fields[0] == "tatami" && len(fields) >= 3 && fields[1] == "run" {
-		return true
-	}
-	switch fields[0] {
-	case "claude", "codex", "gemini", "opencode", "agy":
-		return true
-	default:
-		return false
-	}
+	return age.String()
 }
 
 func copyToClipboard(text string) error {
@@ -359,7 +350,139 @@ func copyToClipboard(text string) error {
 	return cmd.Run()
 }
 
-func handleResult(result *tui.Result) error {
+type processSpec struct {
+	path string
+	args []string
+	dir  string
+}
+
+func quoteShellArg(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func newTabProcess(ws *workspace.Workspace, shellPath string, lookPath func(string) (string, error)) (processSpec, error) {
+	if ws.IsRemote() {
+		sshPath, err := lookPath("ssh")
+		if err != nil {
+			return processSpec{}, fmt.Errorf("ssh not found: %w", err)
+		}
+
+		remotePath := ws.Remote.Path
+		if remotePath == "" {
+			remotePath = ws.Path
+		}
+		remoteCommand := "exec ${SHELL:-/bin/sh}"
+		if remotePath != "" {
+			remoteCommand = "cd " + quoteShellArg(remotePath) + " && " + remoteCommand
+		}
+
+		args := []string{sshPath}
+		if ws.Remote.Key != "" {
+			args = append(args, "-i", ws.Remote.Key)
+		}
+		args = append(args, "-t", "--", ws.Remote.Host, remoteCommand)
+		return processSpec{path: sshPath, args: args}, nil
+	}
+
+	if shellPath == "" {
+		shellPath = "/bin/sh"
+	}
+	resolvedShell, err := lookPath(shellPath)
+	if err != nil {
+		return processSpec{}, fmt.Errorf("shell %q not found: %w", shellPath, err)
+	}
+	return processSpec{
+		path: resolvedShell,
+		args: []string{resolvedShell},
+		dir:  ws.Path,
+	}, nil
+}
+
+func openWorkspaceInNewTab(ws *workspace.Workspace) error {
+	process, err := newTabProcess(ws, os.Getenv("SHELL"), exec.LookPath)
+	if err != nil {
+		return err
+	}
+	if process.dir != "" {
+		if err := os.Chdir(process.dir); err != nil {
+			return fmt.Errorf("failed to enter workspace %q: %w", process.dir, err)
+		}
+	}
+	return syscall.Exec(process.path, process.args, os.Environ())
+}
+
+func newTabTarget(result *tui.Result) (*workspace.Workspace, bool) {
+	if result == nil || result.Workspace == nil {
+		return nil, false
+	}
+	if result.Action == tui.ActionCD {
+		return result.Workspace, true
+	}
+	if result.Action != tui.ActionWorktree || result.Worktree == nil || result.Template == nil {
+		return nil, false
+	}
+	if result.Template.MainCmd != "" || len(result.Template.Panes) > 0 {
+		return nil, false
+	}
+
+	target := *result.Workspace
+	target.Name = result.Worktree.Branch
+	if target.Name == "" {
+		target.Name = "worktree"
+	}
+	target.Path = result.Worktree.Path
+	target.Remote = nil
+	return &target, true
+}
+
+func herdrTarget(result *tui.Result) (*workspace.Workspace, bool) {
+	if result == nil || result.Workspace == nil || result.Workspace.Layout.Type != workspace.LayoutHerdr {
+		return nil, false
+	}
+
+	target := *result.Workspace
+	switch result.Action {
+	case tui.ActionWithLayout, tui.ActionCD:
+		return &target, true
+
+	case tui.ActionWithTemplate:
+		if result.Template == nil {
+			return nil, false
+		}
+		target.Layout = workspace.Layout{
+			Type:    workspace.LayoutHerdr,
+			MainCmd: result.Template.MainCmd,
+			Panes:   append([]workspace.Pane(nil), result.Template.Panes...),
+		}
+		return &target, true
+
+	case tui.ActionWorktree:
+		if result.Worktree == nil {
+			return nil, false
+		}
+		target.Name = result.Worktree.Branch
+		if target.Name == "" {
+			target.Name = "worktree"
+		}
+		target.Path = result.Worktree.Path
+		target.Remote = nil
+		return &target, true
+	}
+
+	return nil, false
+}
+
+func herdrSessionName(result *tui.Result, target *workspace.Workspace) string {
+	if result != nil && result.HerdrMode == tui.HerdrOpenExisting {
+		return strings.TrimSpace(result.HerdrSessionName)
+	}
+	if result != nil && strings.TrimSpace(result.HerdrSessionName) != "" {
+		return strings.TrimSpace(result.HerdrSessionName)
+	}
+	return shell.SessionName(target.Name)
+}
+
+func handleResult(result *tui.Result, newTabMode bool) error {
 	// Handle session attachment first (doesn't need workspace)
 	if result.Action == tui.ActionAttachSession {
 		if result.SessionName == "" {
@@ -375,8 +498,37 @@ func handleResult(result *tui.Result) error {
 		args := shell.AttachSessionCmd(result.SessionName)
 		return syscall.Exec(zellijPath, args, os.Environ())
 	}
+	if result.Action == tui.ActionAttachHerdrSession {
+		if result.SessionName == "" {
+			return fmt.Errorf("no Herdr session selected")
+		}
+		return shell.NewHerdrRunner().AttachSession(result.SessionName)
+	}
 
 	ws := result.Workspace
+	if ws == nil {
+		return fmt.Errorf("no workspace selected")
+	}
+	if ws.Layout.Type == workspace.LayoutHerdr {
+		if ws.IsRemote() {
+			return fmt.Errorf("herdr layout backend is only supported for local workspaces")
+		}
+		target, ok := herdrTarget(result)
+		if !ok {
+			return fmt.Errorf("action is not supported by the herdr backend")
+		}
+		session := herdrSessionName(result, target)
+		if session == "" {
+			return fmt.Errorf("no Herdr session selected")
+		}
+		return shell.NewHerdrRunner().RunWithLayoutInSession(target, session)
+	}
+	if newTabMode {
+		if target, ok := newTabTarget(result); ok {
+			return openWorkspaceInNewTab(target)
+		}
+	}
+
 	zellij := shell.NewZellijRunner()
 	tmux := shell.NewTmuxRunner()
 	isRemote := ws.IsRemote()
