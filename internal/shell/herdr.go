@@ -22,6 +22,11 @@ type HerdrRunner struct {
 type herdrExecutor func(args ...string) ([]byte, error)
 type herdrServerStarter func(session string) error
 
+const (
+	herdrAgentStartAttempts   = 100
+	herdrAgentStartRetryDelay = 25 * time.Millisecond
+)
+
 // HerdrSession is a named Herdr session known to the local Herdr installation.
 type HerdrSession struct {
 	Name    string
@@ -34,12 +39,12 @@ func NewHerdrRunner() *HerdrRunner {
 	return NewHerdrRunnerWithRuntime(func(args ...string) ([]byte, error) {
 		cmd := exec.Command("herdr", args...)
 		cmd.Stdin = os.Stdin
-		cmd.Stderr = os.Stderr
 		if len(args) == 2 && args[0] == "--session" {
 			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
 			return nil, cmd.Run()
 		}
-		return cmd.Output()
+		return herdrCommandOutput(cmd)
 	}, func(session string) error {
 		cmd := exec.Command("herdr", "--session", session, "server")
 		if err := cmd.Start(); err != nil {
@@ -50,6 +55,19 @@ func NewHerdrRunner() *HerdrRunner {
 		}
 		return nil
 	})
+}
+
+func herdrCommandOutput(cmd *exec.Cmd) ([]byte, error) {
+	out, err := cmd.Output()
+	if err == nil {
+		return out, nil
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
+			return out, fmt.Errorf("%w: %s", err, stderr)
+		}
+	}
+	return out, err
 }
 
 // NewHerdrRunnerWithExecutor creates a Herdr runner with an injected executor for tests.
@@ -318,11 +336,16 @@ func (h *HerdrRunner) runCommand(session, paneID, command string, index int) err
 			args = append(args, "--")
 			args = append(args, fields[1:]...)
 		}
-		_, err := h.exec(args...)
-		if err != nil {
-			return fmt.Errorf("failed to start herdr agent %s: %w", kind, err)
+		for attempt := 0; attempt < herdrAgentStartAttempts; attempt++ {
+			_, err := h.exec(args...)
+			if err == nil {
+				return nil
+			}
+			if !isHerdrAgentPaneBusy(err) || attempt == herdrAgentStartAttempts-1 {
+				return fmt.Errorf("failed to start herdr agent %s: %w", kind, err)
+			}
+			time.Sleep(herdrAgentStartRetryDelay)
 		}
-		return nil
 	}
 
 	_, err := h.exec("--session", session, "pane", "run", paneID, command)
@@ -330,6 +353,14 @@ func (h *HerdrRunner) runCommand(session, paneID, command string, index int) err
 		return fmt.Errorf("failed to run herdr pane command %q: %w", command, err)
 	}
 	return nil
+}
+
+func isHerdrAgentPaneBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "agent_pane_busy") || strings.Contains(message, "not an available shell")
 }
 
 func isHerdrAgentKind(command string) bool {

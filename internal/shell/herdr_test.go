@@ -1,6 +1,8 @@
 package shell
 
 import (
+	"errors"
+	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
@@ -10,6 +12,14 @@ import (
 
 type recordedHerdrCommand struct {
 	args []string
+}
+
+func TestHerdrCommandOutputPreservesStructuredStderr(t *testing.T) {
+	cmd := exec.Command("sh", "-c", `printf '%s' '{"error":{"code":"agent_pane_busy"}}' >&2; exit 1`)
+	_, err := herdrCommandOutput(cmd)
+	if err == nil || !strings.Contains(err.Error(), "agent_pane_busy") {
+		t.Fatalf("herdrCommandOutput error = %v; want structured stderr", err)
+	}
 }
 
 func TestHerdrRunWithLayoutStartsSessionCreatesWorkspaceAndAttaches(t *testing.T) {
@@ -246,6 +256,65 @@ func TestHerdrRunWithLayoutInSessionUsesProjectSession(t *testing.T) {
 	}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("commands mismatch\ngot:  %#v\nwant: %#v", commands, want)
+	}
+}
+
+func TestHerdrRunWithLayoutRetriesAgentStartUntilNewPaneIsReady(t *testing.T) {
+	agentAttempts := 0
+	runner := NewHerdrRunnerWithRuntime(func(args ...string) ([]byte, error) {
+		switch {
+		case reflect.DeepEqual(args, []string{"--session", "team", "status", "server", "--json"}):
+			return []byte(`{"running":true}`), nil
+		case reflect.DeepEqual(args, []string{"--session", "team", "workspace", "list"}):
+			return []byte(`{"result":{"workspaces":[]}}`), nil
+		case reflect.DeepEqual(args, []string{"--session", "team", "workspace", "create", "--cwd", "/tmp/feature", "--label", "feature", "--focus"}):
+			return []byte(`{"result":{"root_pane":{"pane_id":"w2:p1"}}}`), nil
+		case reflect.DeepEqual(args, []string{"--session", "team", "agent", "start", "claude", "--kind", "claude", "--pane", "w2:p1"}):
+			agentAttempts++
+			if agentAttempts == 1 {
+				return nil, errors.New(`{"error":{"code":"agent_pane_busy","message":"agent target pane w2:p1 is not an available shell"}}`)
+			}
+			return []byte(`{"result":{"agent":{"pane_id":"w2:p1"}}}`), nil
+		case reflect.DeepEqual(args, []string{"--session", "team"}):
+			return nil, nil
+		default:
+			t.Fatalf("unexpected command: %#v", args)
+			return nil, nil
+		}
+	}, func(string) error {
+		t.Fatal("running Herdr session was started again")
+		return nil
+	})
+
+	ws := &workspace.Workspace{
+		Name: "feature",
+		Path: "/tmp/feature",
+		Layout: workspace.Layout{
+			Type:    workspace.LayoutHerdr,
+			MainCmd: "claude",
+		},
+	}
+	if err := runner.RunWithLayoutInSession(ws, "team"); err != nil {
+		t.Fatalf("RunWithLayoutInSession returned error: %v", err)
+	}
+	if agentAttempts != 2 {
+		t.Fatalf("agent start attempts = %d; want 2", agentAttempts)
+	}
+}
+
+func TestHerdrRunCommandDoesNotRetryNonTransientAgentError(t *testing.T) {
+	attempts := 0
+	runner := NewHerdrRunnerWithExecutor(func(args ...string) ([]byte, error) {
+		attempts++
+		return nil, errors.New("agent executable was not found")
+	})
+
+	err := runner.runCommand("team", "w2:p1", "claude", 0)
+	if err == nil || !strings.Contains(err.Error(), "agent executable was not found") {
+		t.Fatalf("runCommand error = %v; want original agent error", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("agent start attempts = %d; want 1", attempts)
 	}
 }
 
