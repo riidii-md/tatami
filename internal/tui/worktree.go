@@ -26,6 +26,8 @@ type WorktreeView struct {
 	branches        []string
 	cursor          int
 	mode            WorktreeMode
+	filter          textinput.Model
+	filtering       bool
 	branchInput     textinput.Model
 	suggestions     []string
 	suggCursor      int
@@ -43,6 +45,11 @@ func (w *WorktreeView) SetMobileMode(enabled bool) {
 
 // NewWorktreeView creates a new worktree view
 func NewWorktreeView(repoPath string) *WorktreeView {
+	filter := textinput.New()
+	filter.Placeholder = "Filter worktrees..."
+	filter.CharLimit = 100
+	filter.Width = 40
+
 	branchInput := textinput.New()
 	branchInput.Placeholder = "branch-name"
 	branchInput.CharLimit = 100
@@ -51,6 +58,7 @@ func NewWorktreeView(repoPath string) *WorktreeView {
 
 	v := &WorktreeView{
 		repoPath:    repoPath,
+		filter:      filter,
 		branchInput: branchInput,
 		mode:        WorktreeModeList,
 	}
@@ -83,6 +91,64 @@ func (w *WorktreeView) Mode() WorktreeMode {
 	return w.mode
 }
 
+// IsFiltering reports whether the worktree filter is active.
+func (w *WorktreeView) IsFiltering() bool {
+	return w.filtering
+}
+
+func (w *WorktreeView) clearFilter() {
+	w.filtering = false
+	w.filter.Blur()
+	w.filter.SetValue("")
+	w.cursor = 0
+}
+
+func (w *WorktreeView) filteredWorktreeIndexes() []int {
+	query := strings.ToLower(strings.TrimSpace(w.filter.Value()))
+	indexes := make([]int, 0, len(w.worktrees))
+	for i, wt := range w.worktrees {
+		if query == "" || strings.Contains(strings.ToLower(wt.Branch), query) || strings.Contains(strings.ToLower(wt.Path), query) {
+			indexes = append(indexes, i)
+		}
+	}
+	return indexes
+}
+
+func (w *WorktreeView) clampListCursor(worktreeCount int) {
+	if w.cursor < 0 {
+		w.cursor = 0
+	}
+	if w.cursor > worktreeCount {
+		w.cursor = worktreeCount
+	}
+}
+
+func (w *WorktreeView) beginCreate(branch string) {
+	w.filtering = false
+	w.filter.Blur()
+	w.filter.SetValue("")
+	w.mode = WorktreeModeCreate
+	w.branchInput.SetValue(branch)
+	w.branchInput.CursorEnd()
+	w.branchInput.Focus()
+	w.updateSuggestions()
+}
+
+func (w *WorktreeView) selectListItem(indexes []int) tea.Cmd {
+	if w.cursor >= len(indexes) {
+		branch := ""
+		if w.filtering {
+			branch = strings.TrimSpace(w.filter.Value())
+		}
+		w.beginCreate(branch)
+		return nil
+	}
+
+	wt := w.worktrees[indexes[w.cursor]]
+	w.selected = &wt
+	return tea.Quit
+}
+
 // Update handles input for the worktree view
 func (w *WorktreeView) Update(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
@@ -100,8 +166,38 @@ func (w *WorktreeView) Update(msg tea.Msg) tea.Cmd {
 }
 
 func (w *WorktreeView) updateList(msg tea.KeyMsg) tea.Cmd {
+	indexes := w.filteredWorktreeIndexes()
+	if w.filtering {
+		switch msg.String() {
+		case "esc":
+			w.clearFilter()
+			return nil
+		case "down", "ctrl+n":
+			if w.cursor < len(indexes) {
+				w.cursor++
+			}
+			return nil
+		case "up", "ctrl+p":
+			if w.cursor > 0 {
+				w.cursor--
+			}
+			return nil
+		case "enter":
+			return w.selectListItem(indexes)
+		}
+
+		previous := w.filter.Value()
+		var cmd tea.Cmd
+		w.filter, cmd = w.filter.Update(msg)
+		if w.filter.Value() != previous {
+			w.cursor = 0
+		}
+		w.clampListCursor(len(w.filteredWorktreeIndexes()))
+		return cmd
+	}
+
 	if w.mobileMode {
-		if index, ok := numberKeyIndex(msg.String(), len(w.worktrees)+1); ok {
+		if index, ok := numberKeyIndex(msg.String(), len(indexes)+1); ok {
 			w.cursor = index
 			return nil
 		}
@@ -109,7 +205,7 @@ func (w *WorktreeView) updateList(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "j", "down":
 		// +1 for "Create new" option
-		if w.cursor < len(w.worktrees) {
+		if w.cursor < len(indexes) {
 			w.cursor++
 		}
 	case "k", "up":
@@ -119,27 +215,21 @@ func (w *WorktreeView) updateList(msg tea.KeyMsg) tea.Cmd {
 	case "g":
 		w.cursor = 0
 	case "G":
-		w.cursor = len(w.worktrees) // "Create new" option
+		w.cursor = len(indexes) // "Create new" option
+	case "/":
+		w.filtering = true
+		w.filter.SetValue("")
+		w.filter.Focus()
+		w.cursor = 0
 	case "d":
 		// Delete only non-main worktrees
-		if w.cursor < len(w.worktrees) && !w.worktrees[w.cursor].IsMain {
-			w.deleteIndex = w.cursor
-			w.dockerResources = docker.FindResources(w.worktrees[w.cursor].Path)
+		if w.cursor < len(indexes) && !w.worktrees[indexes[w.cursor]].IsMain {
+			w.deleteIndex = indexes[w.cursor]
+			w.dockerResources = docker.FindResources(w.worktrees[w.deleteIndex].Path)
 			w.mode = WorktreeModeConfirmDelete
 		}
 	case "enter":
-		if w.cursor == len(w.worktrees) {
-			// "Create new" selected
-			w.mode = WorktreeModeCreate
-			w.branchInput.SetValue("")
-			w.branchInput.Focus()
-			w.updateSuggestions()
-		} else {
-			// Existing worktree selected
-			wt := w.worktrees[w.cursor]
-			w.selected = &wt
-			return tea.Quit
-		}
+		return w.selectListItem(indexes)
 	}
 	return nil
 }
@@ -285,17 +375,28 @@ func (w *WorktreeView) View() string {
 
 func (w *WorktreeView) viewList() string {
 	var b strings.Builder
+	indexes := w.filteredWorktreeIndexes()
+	w.clampListCursor(len(indexes))
 
 	b.WriteString(titleStyle.Render("Git Worktrees"))
 	b.WriteString("\n\n")
+	if w.filtering {
+		b.WriteString(w.filter.View())
+		b.WriteString("\n\n")
+	}
 
 	if len(w.worktrees) == 0 && w.errorMsg != "" {
 		b.WriteString(errorStyle.Render(w.errorMsg))
 		b.WriteString("\n\n")
 	}
+	if w.filtering && strings.TrimSpace(w.filter.Value()) != "" && len(indexes) == 0 {
+		b.WriteString(mutedStyle.Render("No matching worktrees."))
+		b.WriteString("\n")
+	}
 
 	// List existing worktrees
-	for i, wt := range w.worktrees {
+	for i, worktreeIndex := range indexes {
+		wt := w.worktrees[worktreeIndex]
 		cursor := choicePrefix(w.mobileMode, i, i == w.cursor)
 		style := normalStyle
 		if i == w.cursor {
@@ -315,16 +416,18 @@ func (w *WorktreeView) viewList() string {
 	}
 
 	// "Create new" option
-	cursor := choicePrefix(w.mobileMode, len(w.worktrees), w.cursor == len(w.worktrees))
+	cursor := choicePrefix(w.mobileMode, len(indexes), w.cursor == len(indexes))
 	style := normalStyle
-	if w.cursor == len(w.worktrees) {
+	if w.cursor == len(indexes) {
 		style = selectedStyle
 	}
 	b.WriteString(cursor + style.Render("+ Create new worktree") + "\n")
 
-	help := "\n[enter]select  [d]delete  [esc]back"
-	if w.mobileMode {
-		help = "\n[↑↓/1-9]select  [enter]open  [d]delete  [b]back"
+	help := "\n[enter]select  [d]delete  [/]filter  [esc]back"
+	if w.filtering {
+		help = "\n[↑↓]select  [enter]open/create  [esc]clear"
+	} else if w.mobileMode {
+		help = "\n[↑↓/1-9]select  [enter]open  [d]delete  [/]filter  [b]back"
 	}
 	b.WriteString(helpStyle.Render(help))
 
