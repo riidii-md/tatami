@@ -227,7 +227,7 @@ func (a *App) handleMobileBack(msg tea.KeyMsg) (bool, tea.Model, tea.Cmd) {
 	case ViewActions, ViewTemplates, ViewWorktreeActions, ViewSessions,
 		ViewHerdrOpenMode, ViewHerdrSessionPicker, ViewHerdrSessionDelete:
 	case ViewWorktree:
-		if a.worktreeView == nil || a.worktreeView.Mode() == WorktreeModeCreate {
+		if a.worktreeView == nil || a.worktreeView.Mode() == WorktreeModeCreate || a.worktreeView.IsFiltering() {
 			return false, a, nil
 		}
 	default:
@@ -564,7 +564,7 @@ func (a *App) updateWorktree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "q":
 		// Only go back if in list mode
-		if a.worktreeView.Mode() == WorktreeModeList {
+		if a.worktreeView.Mode() == WorktreeModeList && !a.worktreeView.IsFiltering() {
 			a.currentView = ViewActions
 			return a, nil
 		}
