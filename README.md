@@ -138,6 +138,25 @@ Herdr-backed layouts continue to launch known AI commands through Herdr's own
 agent control plane. Use `tatami run` for agents launched manually in a shell,
 Zellij/tmux pane, or Kitty window.
 
+To see a current resource snapshot for every AI agent managed by running Herdr
+sessions:
+
+```bash
+tatami resources
+```
+
+Tatami groups agents by Herdr session and reports CPU, summed resident memory
+(RSS), process count, and runtime. Descendant processes such as MCP servers are
+included. Agent CPU uses the usual per-core convention and can exceed 100%; the
+summary also normalizes it against the machine's logical CPU count. RSS can
+double-count shared memory pages, so it is an operational estimate rather than
+an exact billing number. If a pane changes occupants while Tatami samples it,
+that agent is shown as unavailable instead of being guessed.
+
+Resource snapshots are read-only and stay local. Tatami does not parse, print,
+or persist process arguments, prompts, or terminal contents. Resource reporting
+requires Herdr 0.8 or newer.
+
 ## Features
 
 ### Folders

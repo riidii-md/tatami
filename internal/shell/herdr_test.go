@@ -385,6 +385,48 @@ func TestParseHerdrSessions(t *testing.T) {
 	}
 }
 
+func TestParseHerdrAgents(t *testing.T) {
+	input := []byte(`{"id":"cli:agent:list","result":{"agents":[{"agent":"claude","agent_status":"idle","cwd":"/repo","pane_id":"w2:p1","terminal_id":"term-1","workspace_id":"w2","agent_session":{"value":"claude-session"}},{"agent":"codex","agent_status":"blocked","cwd":"/repo/worktree","pane_id":"w3:p2","terminal_id":"term-2","workspace_id":"w3","agent_session":{"value":"codex-session"}}]}}`)
+
+	agents, err := parseHerdrAgents(input)
+	if err != nil {
+		t.Fatalf("parseHerdrAgents returned error: %v", err)
+	}
+	want := []HerdrAgent{
+		{Kind: "claude", Status: "idle", CWD: "/repo", PaneID: "w2:p1", TerminalID: "term-1", WorkspaceID: "w2", AgentSessionID: "claude-session"},
+		{Kind: "codex", Status: "blocked", CWD: "/repo/worktree", PaneID: "w3:p2", TerminalID: "term-2", WorkspaceID: "w3", AgentSessionID: "codex-session"},
+	}
+	if !reflect.DeepEqual(agents, want) {
+		t.Fatalf("agents = %#v; want %#v", agents, want)
+	}
+}
+
+func TestParseHerdrPaneProcessInfo(t *testing.T) {
+	input := []byte(`{"id":"cli:pane:process_info","result":{"process_info":{"foreground_process_group_id":43828,"foreground_processes":[{"pid":43828,"name":"claude.exe"},{"pid":45006,"name":"node"}],"pane_id":"w2:p1","shell_pid":38785}}}`)
+
+	info, err := parseHerdrPaneProcessInfo(input)
+	if err != nil {
+		t.Fatalf("parseHerdrPaneProcessInfo returned error: %v", err)
+	}
+	want := HerdrPaneProcessInfo{
+		PaneID:                   "w2:p1",
+		ShellPID:                 38785,
+		ForegroundProcessGroupID: 43828,
+		ForegroundPIDs:           []int32{43828, 45006},
+	}
+	if !reflect.DeepEqual(info, want) {
+		t.Fatalf("process info = %#v; want %#v", info, want)
+	}
+}
+
+func TestParseHerdrPaneProcessInfoRejectsMissingForegroundProcesses(t *testing.T) {
+	input := []byte(`{"result":{"process_info":{"pane_id":"w2:p1","shell_pid":38785}}}`)
+
+	if _, err := parseHerdrPaneProcessInfo(input); err == nil {
+		t.Fatal("missing foreground process information was accepted")
+	}
+}
+
 func TestHerdrLayoutTypeIsPersistedAsHerdr(t *testing.T) {
 	ws := workspace.NewWorkspace("agents", "/tmp/agents")
 	ws.Layout.Type = workspace.LayoutHerdr

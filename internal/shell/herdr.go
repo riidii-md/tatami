@@ -34,6 +34,25 @@ type HerdrSession struct {
 	Default bool
 }
 
+// HerdrAgent describes an AI agent currently occupying a Herdr pane.
+type HerdrAgent struct {
+	Kind           string
+	Status         string
+	CWD            string
+	PaneID         string
+	TerminalID     string
+	WorkspaceID    string
+	AgentSessionID string
+}
+
+// HerdrPaneProcessInfo identifies the local process group occupying a Herdr pane.
+type HerdrPaneProcessInfo struct {
+	PaneID                   string
+	ShellPID                 int32
+	ForegroundProcessGroupID int32
+	ForegroundPIDs           []int32
+}
+
 // NewHerdrRunner creates a new Herdr runner.
 func NewHerdrRunner() *HerdrRunner {
 	return NewHerdrRunnerWithRuntime(func(args ...string) ([]byte, error) {
@@ -202,6 +221,109 @@ func parseHerdrSessions(data []byte) ([]HerdrSession, error) {
 		})
 	}
 	return sessions, nil
+}
+
+// ListHerdrAgents lists the AI agents registered in a running Herdr session.
+func ListHerdrAgents(session string) ([]HerdrAgent, error) {
+	if strings.TrimSpace(session) == "" {
+		return nil, fmt.Errorf("herdr session name is required")
+	}
+	out, err := exec.Command("herdr", "--session", session, "agent", "list").Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list agents in herdr session %s: %w", session, err)
+	}
+	return parseHerdrAgents(out)
+}
+
+func parseHerdrAgents(data []byte) ([]HerdrAgent, error) {
+	var response struct {
+		Result struct {
+			Agents []struct {
+				Kind        string `json:"agent"`
+				Status      string `json:"agent_status"`
+				CWD         string `json:"cwd"`
+				PaneID      string `json:"pane_id"`
+				TerminalID  string `json:"terminal_id"`
+				WorkspaceID string `json:"workspace_id"`
+				Session     struct {
+					Value string `json:"value"`
+				} `json:"agent_session"`
+			} `json:"agents"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		return nil, fmt.Errorf("failed to parse herdr agents: %w", err)
+	}
+
+	agents := make([]HerdrAgent, 0, len(response.Result.Agents))
+	for _, candidate := range response.Result.Agents {
+		if candidate.PaneID == "" {
+			continue
+		}
+		agents = append(agents, HerdrAgent{
+			Kind:           candidate.Kind,
+			Status:         candidate.Status,
+			CWD:            candidate.CWD,
+			PaneID:         candidate.PaneID,
+			TerminalID:     candidate.TerminalID,
+			WorkspaceID:    candidate.WorkspaceID,
+			AgentSessionID: candidate.Session.Value,
+		})
+	}
+	return agents, nil
+}
+
+// GetHerdrPaneProcessInfo returns the process group currently occupying a Herdr pane.
+func GetHerdrPaneProcessInfo(session, paneID string) (HerdrPaneProcessInfo, error) {
+	if strings.TrimSpace(session) == "" {
+		return HerdrPaneProcessInfo{}, fmt.Errorf("herdr session name is required")
+	}
+	if strings.TrimSpace(paneID) == "" {
+		return HerdrPaneProcessInfo{}, fmt.Errorf("herdr pane ID is required")
+	}
+	out, err := exec.Command("herdr", "--session", session, "pane", "process-info", "--pane", paneID).Output()
+	if err != nil {
+		return HerdrPaneProcessInfo{}, fmt.Errorf("failed to inspect herdr pane %s in session %s: %w", paneID, session, err)
+	}
+	return parseHerdrPaneProcessInfo(out)
+}
+
+func parseHerdrPaneProcessInfo(data []byte) (HerdrPaneProcessInfo, error) {
+	var response struct {
+		Result struct {
+			ProcessInfo struct {
+				ForegroundProcessGroupID int32 `json:"foreground_process_group_id"`
+				ForegroundProcesses      []struct {
+					PID int32 `json:"pid"`
+				} `json:"foreground_processes"`
+				PaneID   string `json:"pane_id"`
+				ShellPID int32  `json:"shell_pid"`
+			} `json:"process_info"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		return HerdrPaneProcessInfo{}, fmt.Errorf("failed to parse herdr pane process info: %w", err)
+	}
+	processInfo := response.Result.ProcessInfo
+	if processInfo.ForegroundProcessGroupID <= 0 || len(processInfo.ForegroundProcesses) == 0 {
+		return HerdrPaneProcessInfo{}, fmt.Errorf("herdr pane %s has no foreground process", processInfo.PaneID)
+	}
+
+	info := HerdrPaneProcessInfo{
+		PaneID:                   processInfo.PaneID,
+		ShellPID:                 processInfo.ShellPID,
+		ForegroundProcessGroupID: processInfo.ForegroundProcessGroupID,
+		ForegroundPIDs:           make([]int32, 0, len(processInfo.ForegroundProcesses)),
+	}
+	for _, process := range processInfo.ForegroundProcesses {
+		if process.PID > 0 {
+			info.ForegroundPIDs = append(info.ForegroundPIDs, process.PID)
+		}
+	}
+	if len(info.ForegroundPIDs) == 0 {
+		return HerdrPaneProcessInfo{}, fmt.Errorf("herdr pane %s has no foreground process", processInfo.PaneID)
+	}
+	return info, nil
 }
 
 func (h *HerdrRunner) ensureSession(session string) error {
