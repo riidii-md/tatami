@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/OleksandrBesan/tatami/internal/shell"
+	"github.com/OleksandrBesan/tatami/internal/systemusage"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -33,6 +35,10 @@ type ListView struct {
 	height        int
 	mobileMode    bool
 	herdrSessions herdrSessionLister
+	herdrUsage    *systemusage.SessionUsage
+	herdrUsageFor string
+	herdrUsageErr error
+	herdrLoading  bool
 }
 
 // NewListView creates a new list view
@@ -298,6 +304,30 @@ func (l *ListView) SetInZellij(inZellij bool) {
 	l.inZellij = inZellij
 }
 
+// SetHerdrUsageLoading shows a pending resource snapshot for a highlighted session.
+func (l *ListView) SetHerdrUsageLoading(session string) {
+	l.herdrUsageFor = session
+	l.herdrUsage = nil
+	l.herdrUsageErr = nil
+	l.herdrLoading = true
+}
+
+// SetHerdrUsage stores the latest resource snapshot for a highlighted session.
+func (l *ListView) SetHerdrUsage(session string, usage *systemusage.SessionUsage, err error) {
+	l.herdrUsageFor = session
+	l.herdrUsage = usage
+	l.herdrUsageErr = err
+	l.herdrLoading = false
+}
+
+// ClearHerdrUsage removes resource state when the selection leaves Herdr sessions.
+func (l *ListView) ClearHerdrUsage() {
+	l.herdrUsageFor = ""
+	l.herdrUsage = nil
+	l.herdrUsageErr = nil
+	l.herdrLoading = false
+}
+
 // Update handles input for the list view
 func (l *ListView) Update(msg tea.Msg) tea.Cmd {
 	if l.filtering {
@@ -485,6 +515,12 @@ func (l *ListView) View() string {
 		}
 	}
 
+	if usage := l.herdrUsageView(); usage != "" {
+		b.WriteString("\n")
+		b.WriteString(usage)
+		b.WriteString("\n")
+	}
+
 	// Help text
 	var help string
 	if l.mobileMode && !l.filtering {
@@ -526,6 +562,71 @@ func (l *ListView) View() string {
 		padding = lipgloss.NewStyle().Padding(0, 1)
 	}
 	return padding.Render(b.String())
+}
+
+func (l *ListView) herdrUsageView() string {
+	selected := l.Selected()
+	if selected == nil || selected.Type != "herdr_session" || selected.Herdr == nil {
+		return ""
+	}
+	if !selected.Herdr.Running {
+		return labelStyle.Render("Usage") + mutedStyle.Render("  stopped")
+	}
+	if l.herdrUsageFor != selected.Name {
+		return ""
+	}
+	if l.herdrLoading {
+		return labelStyle.Render("Usage") + mutedStyle.Render("  loading…")
+	}
+	if l.herdrUsageErr != nil {
+		reason := strings.Join(strings.Fields(l.herdrUsageErr.Error()), " ")
+		return labelStyle.Render("Usage") + errorStyle.Render("  unavailable: "+reason)
+	}
+	if l.herdrUsage == nil {
+		return ""
+	}
+
+	usage := l.herdrUsage
+	line := fmt.Sprintf(
+		"  CPU %.1f%%  RAM %s  PROCS %d  AGENTS %d  MAX AGE %s",
+		usage.CPUPercent,
+		formatUsageBytes(usage.RSSBytes),
+		usage.ProcessCount,
+		len(usage.Agents),
+		formatUsageAge(usage.MaxAge),
+	)
+	return labelStyle.Render("Usage") + normalStyle.Render(line)
+}
+
+func formatUsageBytes(bytes uint64) string {
+	const unit = uint64(1024)
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	divisor := unit
+	unitName := "KiB"
+	for _, candidate := range []string{"MiB", "GiB", "TiB", "PiB"} {
+		if bytes < divisor*unit {
+			break
+		}
+		divisor *= unit
+		unitName = candidate
+	}
+	value := float64(bytes) / float64(divisor)
+	if value >= 10 || value == float64(uint64(value)) {
+		return fmt.Sprintf("%.0f %s", value, unitName)
+	}
+	return fmt.Sprintf("%.1f %s", value, unitName)
+}
+
+func formatUsageAge(age time.Duration) string {
+	if age <= 0 {
+		return "0s"
+	}
+	if age < time.Minute {
+		return age.Round(time.Second).String()
+	}
+	return strings.TrimSuffix(age.Truncate(time.Minute).String(), "0s")
 }
 
 func shortenPath(path string, maxLen int) string {

@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/OleksandrBesan/tatami/internal/git"
 	"github.com/OleksandrBesan/tatami/internal/shell"
+	"github.com/OleksandrBesan/tatami/internal/systemusage"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -45,6 +47,21 @@ type Result struct {
 type herdrSessionLister func() ([]shell.HerdrSession, error)
 type herdrSessionStopper func(string) error
 type herdrSessionDeleter func(string) error
+type herdrSessionUsageCollector func(string) (systemusage.Report, error)
+
+const herdrUsageDebounce = 120 * time.Millisecond
+
+type herdrUsageRequestMsg struct {
+	Session    string
+	Generation uint64
+}
+
+type herdrUsageResultMsg struct {
+	Session    string
+	Generation uint64
+	Report     systemusage.Report
+	Err        error
+}
 
 // AppOption configures optional chooser behavior.
 type AppOption func(*App)
@@ -85,37 +102,46 @@ func WithHerdrSessionDeleter(deleter func(string) error) AppOption {
 	}
 }
 
+// WithHerdrSessionUsageCollector injects highlighted-session resource collection.
+func WithHerdrSessionUsageCollector(collector func(string) (systemusage.Report, error)) AppOption {
+	return func(a *App) {
+		a.herdrSessionUsageCollector = collector
+	}
+}
+
 // App is the main Bubbletea model
 type App struct {
-	store                  *workspace.Store
-	zellij                 *shell.ZellijRunner
-	tmux                   *shell.TmuxRunner
-	currentView            View
-	previousView           View
-	listView               *ListView
-	createView             *CreateView
-	actionsView            *ActionView
-	layoutEditor           *LayoutEditor
-	templateView           *TemplateView
-	folderInput            *FolderInput
-	worktreeView           *WorktreeView
-	worktreeActionView     *WorktreeActionView
-	sessionView            *SessionView
-	herdrOpenModeView      *HerdrOpenModeView
-	herdrSessionNameView   *HerdrSessionNameView
-	herdrSessionPickerView *HerdrSessionPickerView
-	herdrSessionDeleteView *HerdrSessionDeleteView
-	pendingHerdrResult     *Result
-	herdrOpenBackView      View
-	result                 *Result
-	width                  int
-	height                 int
-	err                    error
-	newTabMode             bool
-	mobileMode             bool
-	herdrSessionLister     herdrSessionLister
-	herdrSessionStopper    herdrSessionStopper
-	herdrSessionDeleter    herdrSessionDeleter
+	store                      *workspace.Store
+	zellij                     *shell.ZellijRunner
+	tmux                       *shell.TmuxRunner
+	currentView                View
+	previousView               View
+	listView                   *ListView
+	createView                 *CreateView
+	actionsView                *ActionView
+	layoutEditor               *LayoutEditor
+	templateView               *TemplateView
+	folderInput                *FolderInput
+	worktreeView               *WorktreeView
+	worktreeActionView         *WorktreeActionView
+	sessionView                *SessionView
+	herdrOpenModeView          *HerdrOpenModeView
+	herdrSessionNameView       *HerdrSessionNameView
+	herdrSessionPickerView     *HerdrSessionPickerView
+	herdrSessionDeleteView     *HerdrSessionDeleteView
+	pendingHerdrResult         *Result
+	herdrOpenBackView          View
+	result                     *Result
+	width                      int
+	height                     int
+	err                        error
+	newTabMode                 bool
+	mobileMode                 bool
+	herdrSessionLister         herdrSessionLister
+	herdrSessionStopper        herdrSessionStopper
+	herdrSessionDeleter        herdrSessionDeleter
+	herdrSessionUsageCollector herdrSessionUsageCollector
+	herdrUsageGeneration       uint64
 }
 
 // NewApp creates a new App
@@ -125,15 +151,16 @@ func NewApp(store *workspace.Store, options ...AppOption) *App {
 
 	herdrRunner := shell.NewHerdrRunner()
 	app := &App{
-		store:               store,
-		zellij:              zellij,
-		tmux:                tmux,
-		currentView:         ViewList,
-		createView:          NewCreateView(),
-		layoutEditor:        NewLayoutEditor(),
-		herdrSessionLister:  shell.ListHerdrSessions,
-		herdrSessionStopper: herdrRunner.StopSession,
-		herdrSessionDeleter: herdrRunner.DeleteSession,
+		store:                      store,
+		zellij:                     zellij,
+		tmux:                       tmux,
+		currentView:                ViewList,
+		createView:                 NewCreateView(),
+		layoutEditor:               NewLayoutEditor(),
+		herdrSessionLister:         shell.ListHerdrSessions,
+		herdrSessionStopper:        herdrRunner.StopSession,
+		herdrSessionDeleter:        herdrRunner.DeleteSession,
+		herdrSessionUsageCollector: systemusage.CollectHerdrSession,
 	}
 	for _, option := range options {
 		option(app)
@@ -156,7 +183,7 @@ func (a *App) Result() *Result {
 
 // Init implements tea.Model
 func (a *App) Init() tea.Cmd {
-	return nil
+	return a.scheduleSelectedHerdrUsage()
 }
 
 // Update implements tea.Model
@@ -166,6 +193,34 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.width = msg.Width
 		a.height = msg.Height
 		a.listView.SetSize(msg.Width, msg.Height)
+		return a, nil
+
+	case herdrUsageRequestMsg:
+		if !a.currentHerdrUsageRequest(msg.Session, msg.Generation) {
+			return a, nil
+		}
+		return a, func() tea.Msg {
+			report, err := a.herdrSessionUsageCollector(msg.Session)
+			return herdrUsageResultMsg{
+				Session: msg.Session, Generation: msg.Generation, Report: report, Err: err,
+			}
+		}
+
+	case herdrUsageResultMsg:
+		if !a.currentHerdrUsageRequest(msg.Session, msg.Generation) {
+			return a, nil
+		}
+		var usage *systemusage.SessionUsage
+		for i := range msg.Report.Sessions {
+			if msg.Report.Sessions[i].Name == msg.Session {
+				usage = &msg.Report.Sessions[i]
+				break
+			}
+		}
+		if usage == nil && msg.Err == nil {
+			usage = &systemusage.SessionUsage{Name: msg.Session}
+		}
+		a.listView.SetHerdrUsage(msg.Session, usage, msg.Err)
 		return a, nil
 
 	case tea.KeyMsg:
@@ -180,7 +235,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// View-specific handling
 		switch a.currentView {
 		case ViewList:
-			return a.updateList(msg)
+			before := a.selectedHerdrUsageKey()
+			model, cmd := a.updateList(msg)
+			if before != a.selectedHerdrUsageKey() {
+				cmd = batchCommands(cmd, a.scheduleSelectedHerdrUsage())
+			}
+			return model, cmd
 		case ViewCreate:
 			return a.updateCreate(msg)
 		case ViewActions:
@@ -209,6 +269,56 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return a, nil
+}
+
+func (a *App) selectedHerdrUsageKey() string {
+	selected := a.listView.Selected()
+	if selected == nil || selected.Type != "herdr_session" || selected.Herdr == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s:%t", selected.Name, selected.Herdr.Running)
+}
+
+func (a *App) scheduleSelectedHerdrUsage() tea.Cmd {
+	a.herdrUsageGeneration++
+	selected := a.listView.Selected()
+	if selected == nil || selected.Type != "herdr_session" || selected.Herdr == nil || !selected.Herdr.Running {
+		a.listView.ClearHerdrUsage()
+		return nil
+	}
+
+	session := selected.Name
+	generation := a.herdrUsageGeneration
+	a.listView.SetHerdrUsageLoading(session)
+	return tea.Tick(herdrUsageDebounce, func(time.Time) tea.Msg {
+		return herdrUsageRequestMsg{Session: session, Generation: generation}
+	})
+}
+
+func (a *App) currentHerdrUsageRequest(session string, generation uint64) bool {
+	if generation != a.herdrUsageGeneration {
+		return false
+	}
+	selected := a.listView.Selected()
+	return selected != nil && selected.Type == "herdr_session" && selected.Herdr != nil &&
+		selected.Herdr.Running && selected.Name == session
+}
+
+func batchCommands(commands ...tea.Cmd) tea.Cmd {
+	valid := make([]tea.Cmd, 0, len(commands))
+	for _, command := range commands {
+		if command != nil {
+			valid = append(valid, command)
+		}
+	}
+	switch len(valid) {
+	case 0:
+		return nil
+	case 1:
+		return valid[0]
+	default:
+		return tea.Batch(valid...)
+	}
 }
 
 func (a *App) handleMobileBack(msg tea.KeyMsg) (bool, tea.Model, tea.Cmd) {

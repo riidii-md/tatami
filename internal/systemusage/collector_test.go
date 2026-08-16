@@ -106,6 +106,63 @@ func TestCollectorReturnsWithoutSamplingWhenThereAreNoRunningAgents(t *testing.T
 	}
 }
 
+func TestCollectorCollectSessionOnlyQueriesRequestedSession(t *testing.T) {
+	snapshotCalls := 0
+	collector := Collector{
+		listSessions: func() ([]shell.HerdrSession, error) {
+			t.Fatal("single-session collection listed the session inventory")
+			return nil, nil
+		},
+		listAgents: func(session string) ([]shell.HerdrAgent, error) {
+			if session != "team" {
+				t.Fatalf("listed agents for session %q; want team", session)
+			}
+			return []shell.HerdrAgent{{Kind: "claude", Status: "idle", PaneID: "w1:p1"}}, nil
+		},
+		processInfo: func(session, paneID string) (shell.HerdrPaneProcessInfo, error) {
+			if session != "team" || paneID != "w1:p1" {
+				t.Fatalf("process info request = %q %q", session, paneID)
+			}
+			return shell.HerdrPaneProcessInfo{
+				ForegroundProcessGroupID: 100,
+				ForegroundPIDs:           []int32{100},
+			}, nil
+		},
+		snapshot: func() ([]ProcessSample, error) {
+			snapshotCalls++
+			cpu := float64(snapshotCalls)
+			return []ProcessSample{{
+				PID: 100, PPID: 1, StartedAtMillis: 1_000, CPUSeconds: cpu, RSSBytes: 200 * mebibyte,
+			}}, nil
+		},
+		totalMemory:    func() (uint64, error) { return 8 * gibibyte, nil },
+		logicalCPUs:    func() int { return 4 },
+		sleep:          func(time.Duration) {},
+		now:            func() time.Time { return time.Unix(10, 0) },
+		sampleInterval: time.Second,
+	}
+
+	report, err := collector.CollectSession("team")
+	if err != nil {
+		t.Fatalf("CollectSession returned error: %v", err)
+	}
+	if len(report.Sessions) != 1 || report.Sessions[0].Name != "team" {
+		t.Fatalf("single-session report = %#v", report.Sessions)
+	}
+	if report.Sessions[0].RSSBytes != 200*mebibyte || !closeEnough(report.Sessions[0].CPUPercent, 100) {
+		t.Fatalf("single-session totals = %#v", report.Sessions[0])
+	}
+	if snapshotCalls != 2 {
+		t.Fatalf("snapshot calls = %d, want 2", snapshotCalls)
+	}
+}
+
+func TestCollectorCollectSessionRejectsBlankName(t *testing.T) {
+	if _, err := (Collector{}).CollectSession("  "); err == nil {
+		t.Fatal("blank Herdr session name was accepted")
+	}
+}
+
 func TestCollectorPropagatesHerdrAndSnapshotErrors(t *testing.T) {
 	t.Run("sessions", func(t *testing.T) {
 		collector := Collector{listSessions: func() ([]shell.HerdrSession, error) {

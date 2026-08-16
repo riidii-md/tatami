@@ -58,6 +58,9 @@ func TestBuildReportAggregatesForegroundProcessesAndDescendants(t *testing.T) {
 	if session.ProcessCount != 4 || session.RSSBytes != 575*mebibyte || !closeEnough(session.CPUPercent, 85) {
 		t.Fatalf("session totals = %#v", session)
 	}
+	if session.MaxAge != 90*time.Minute {
+		t.Fatalf("session max age = %s, want 90m", session.MaxAge)
+	}
 	if report.ProcessCount != session.ProcessCount || report.RSSBytes != session.RSSBytes || !closeEnough(report.CPUPercent, 85) {
 		t.Fatalf("global totals = %#v", report)
 	}

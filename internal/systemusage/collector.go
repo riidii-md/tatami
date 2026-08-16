@@ -3,6 +3,7 @@ package systemusage
 import (
 	"fmt"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/OleksandrBesan/tatami/internal/shell"
@@ -43,6 +44,11 @@ func CollectHerdr() (Report, error) {
 	return NewCollector().Collect()
 }
 
+// CollectHerdrSession takes one resource-usage snapshot of a named Herdr session.
+func CollectHerdrSession(session string) (Report, error) {
+	return NewCollector().CollectSession(session)
+}
+
 // Collect builds a resource report. A pane that changes occupants during collection
 // is kept in the report as unavailable instead of being attributed speculatively.
 func (collector Collector) Collect() (Report, error) {
@@ -52,24 +58,40 @@ func (collector Collector) Collect() (Report, error) {
 		return Report{}, fmt.Errorf("list herdr sessions: %w", err)
 	}
 
+	running := make([]string, 0, len(sessions))
+	for _, session := range sessions {
+		if session.Running {
+			running = append(running, session.Name)
+		}
+	}
+	return collector.collectSessions(running)
+}
+
+// CollectSession takes one resource snapshot without re-listing the Herdr session inventory.
+func (collector Collector) CollectSession(session string) (Report, error) {
+	if strings.TrimSpace(session) == "" {
+		return Report{}, fmt.Errorf("herdr session name is required")
+	}
+	collector = collector.withDefaults()
+	return collector.collectSessions([]string{session})
+}
+
+func (collector Collector) collectSessions(sessions []string) (Report, error) {
 	targets := make([]AgentTarget, 0)
 	for _, session := range sessions {
-		if !session.Running {
-			continue
-		}
-		agents, err := collector.listAgents(session.Name)
+		agents, err := collector.listAgents(session)
 		if err != nil {
-			return Report{}, fmt.Errorf("list agents in herdr session %s: %w", session.Name, err)
+			return Report{}, fmt.Errorf("list agents in herdr session %s: %w", session, err)
 		}
 		for _, agent := range agents {
 			target := AgentTarget{
-				Session: session.Name,
+				Session: session,
 				Kind:    agent.Kind,
 				Status:  agent.Status,
 				CWD:     agent.CWD,
 				PaneID:  agent.PaneID,
 			}
-			info, err := collector.processInfo(session.Name, agent.PaneID)
+			info, err := collector.processInfo(session, agent.PaneID)
 			if err != nil {
 				target.UnavailableReason = fmt.Sprintf("process info unavailable: %v", err)
 			} else {

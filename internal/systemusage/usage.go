@@ -55,6 +55,7 @@ type SessionUsage struct {
 	CPUPercent   float64
 	RSSBytes     uint64
 	ProcessCount int
+	MaxAge       time.Duration
 }
 
 // Report contains resource usage for every running Herdr agent Tatami could resolve.
@@ -137,6 +138,9 @@ func BuildReport(targets []AgentTarget, before, after []ProcessSample, elapsed t
 			session.CPUPercent += agent.CPUPercent
 			session.RSSBytes += agent.RSSBytes
 			session.ProcessCount += agent.ProcessCount
+			if agent.Age > session.MaxAge {
+				session.MaxAge = agent.Age
+			}
 		} else {
 			report.UnresolvedAgents++
 		}

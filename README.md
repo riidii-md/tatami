@@ -153,6 +153,11 @@ double-count shared memory pages, so it is an operational estimate rather than
 an exact billing number. If a pane changes occupants while Tatami samples it,
 that agent is shown as unavailable instead of being guessed.
 
+On the normal Tatami home screen, highlight a running Herdr session to load a
+compact aggregate directly above the key help: CPU, RSS, process and agent
+counts, and the maximum age among its agents. Moving quickly between sessions
+discards stale results; stopped sessions are never sampled.
+
 Resource snapshots are read-only and stay local. Tatami does not parse, print,
 or persist process arguments, prompts, or terminal contents. Resource reporting
 requires Herdr 0.8 or newer.
