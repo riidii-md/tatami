@@ -6,10 +6,12 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OleksandrBesan/tatami/internal/config"
 	"github.com/OleksandrBesan/tatami/internal/git"
 	"github.com/OleksandrBesan/tatami/internal/shell"
+	"github.com/OleksandrBesan/tatami/internal/systemusage"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -359,6 +361,79 @@ func TestHomePageHerdrSessionCanBeOpened(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("Herdr session selection did not quit")
+	}
+}
+
+func TestHighlightedHerdrUsageIgnoresStaleResults(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "project", Path: "/tmp/project"})
+	collected := make([]string, 0)
+	app := NewApp(store,
+		WithHerdrSessionLister(func() ([]shell.HerdrSession, error) {
+			return []shell.HerdrSession{
+				{Name: "alpha", Running: true},
+				{Name: "beta", Running: true},
+			}, nil
+		}),
+		WithHerdrSessionUsageCollector(func(session string) (systemusage.Report, error) {
+			collected = append(collected, session)
+			return systemusage.Report{Sessions: []systemusage.SessionUsage{{
+				Name: session, CPUPercent: 22, RSSBytes: 256 * 1024 * 1024, ProcessCount: 4,
+				Agents: []systemusage.AgentUsage{{}}, MaxAge: 45 * time.Minute,
+			}}}, nil
+		}),
+	)
+	for i, item := range app.listView.items {
+		if item.Type == "herdr_session" && item.Name == "alpha" {
+			app.listView.cursor = i
+			break
+		}
+	}
+
+	firstRequest := app.scheduleSelectedHerdrUsage()
+	firstGeneration := app.herdrUsageGeneration
+	if firstRequest == nil || !strings.Contains(app.View(), "Usage  loading") {
+		t.Fatalf("initial usage request was not scheduled:\n%s", app.View())
+	}
+
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated := model.(*App)
+	if selected := updated.listView.Selected(); selected == nil || selected.Name != "beta" {
+		t.Fatalf("selected session = %#v; want beta", selected)
+	}
+	if updated.herdrUsageGeneration == firstGeneration {
+		t.Fatal("selection change did not invalidate the first request")
+	}
+
+	model, staleCmd := updated.Update(herdrUsageRequestMsg{Session: "alpha", Generation: firstGeneration})
+	updated = model.(*App)
+	if staleCmd != nil || len(collected) != 0 {
+		t.Fatalf("stale request collected usage: cmd=%T calls=%#v", staleCmd, collected)
+	}
+
+	currentGeneration := updated.herdrUsageGeneration
+	model, collectCmd := updated.Update(herdrUsageRequestMsg{Session: "beta", Generation: currentGeneration})
+	updated = model.(*App)
+	if collectCmd == nil {
+		t.Fatal("current request did not start collection")
+	}
+	result := collectCmd()
+	model, _ = updated.Update(result)
+	updated = model.(*App)
+	if !reflect.DeepEqual(collected, []string{"beta"}) {
+		t.Fatalf("collected sessions = %#v; want beta", collected)
+	}
+	for _, want := range []string{"CPU 22.0%", "RAM 256 MiB", "MAX AGE 45m"} {
+		if !strings.Contains(updated.View(), want) {
+			t.Errorf("beta summary missing %q:\n%s", want, updated.View())
+		}
+	}
+
+	model, _ = updated.Update(herdrUsageResultMsg{
+		Session: "alpha", Generation: firstGeneration,
+		Report: systemusage.Report{Sessions: []systemusage.SessionUsage{{Name: "alpha", CPUPercent: 99}}},
+	})
+	if strings.Contains(model.(*App).View(), "CPU 99.0%") {
+		t.Fatalf("stale result replaced current summary:\n%s", model.(*App).View())
 	}
 }
 

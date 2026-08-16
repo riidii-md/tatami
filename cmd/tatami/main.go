@@ -15,6 +15,7 @@ import (
 	"github.com/OleksandrBesan/tatami/internal/agent"
 	"github.com/OleksandrBesan/tatami/internal/config"
 	"github.com/OleksandrBesan/tatami/internal/shell"
+	"github.com/OleksandrBesan/tatami/internal/systemusage"
 	"github.com/OleksandrBesan/tatami/internal/tui"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
 	tea "github.com/charmbracelet/bubbletea"
@@ -22,6 +23,7 @@ import (
 )
 
 var version = "dev"
+var collectHerdrResources = systemusage.CollectHerdr
 
 type launchOptions struct {
 	newTabMode  bool
@@ -49,6 +51,13 @@ func main() {
 }
 
 func runCLI(args []string, out, errOut io.Writer) int {
+	if len(args) > 0 && args[0] == "resources" {
+		if err := handleResourcesCommand(args[1:], out); err != nil {
+			fmt.Fprintf(errOut, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+	}
 	if len(args) > 0 && (args[0] == "run" || args[0] == "agents") {
 		paths, err := config.GetPaths()
 		if err == nil {
@@ -76,6 +85,118 @@ func runCLI(args []string, out, errOut io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func handleResourcesCommand(args []string, out io.Writer) error {
+	if len(args) > 0 {
+		return errors.New("usage: tatami resources")
+	}
+	report, err := collectHerdrResources()
+	if err != nil {
+		return err
+	}
+	return printHerdrResources(report, out)
+}
+
+func printHerdrResources(report systemusage.Report, out io.Writer) error {
+	if len(report.Sessions) == 0 {
+		fmt.Fprintln(out, "No running Herdr agents found.")
+		return nil
+	}
+
+	table := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(table, "SESSION\tAGENT\tSTATUS\tCPU\tRAM\tPROCS\tAGE\tPANE\tCWD\tNOTE")
+	for _, session := range report.Sessions {
+		for _, agent := range session.Agents {
+			if !agent.Resolved {
+				fmt.Fprintf(
+					table,
+					"%s\t%s\t%s\t-\t-\t-\t-\t%s\t%s\tunavailable: %s\n",
+					session.Name,
+					valueOrDash(agent.Kind),
+					valueOrDash(agent.Status),
+					valueOrDash(agent.PaneID),
+					valueOrDash(agent.CWD),
+					valueOrDash(agent.UnavailableReason),
+				)
+				continue
+			}
+			fmt.Fprintf(
+				table,
+				"%s\t%s\t%s\t%.1f%%\t%s\t%d\t%s\t%s\t%s\t\n",
+				session.Name,
+				valueOrDash(agent.Kind),
+				valueOrDash(agent.Status),
+				agent.CPUPercent,
+				formatIECBytes(agent.RSSBytes),
+				agent.ProcessCount,
+				agent.Age.Round(time.Second),
+				valueOrDash(agent.PaneID),
+				valueOrDash(agent.CWD),
+			)
+		}
+		fmt.Fprintf(
+			table,
+			"%s\tTOTAL\t\t%.1f%%\t%s\t%d\t\t\t\t\n",
+			session.Name,
+			session.CPUPercent,
+			formatIECBytes(session.RSSBytes),
+			session.ProcessCount,
+		)
+	}
+	if err := table.Flush(); err != nil {
+		return err
+	}
+
+	totalAgents := report.ResolvedAgents + report.UnresolvedAgents
+	ramPercent := float64(0)
+	if report.TotalMemoryBytes > 0 {
+		ramPercent = float64(report.RSSBytes) / float64(report.TotalMemoryBytes) * 100
+	}
+	fmt.Fprintf(
+		out,
+		"\nTracked total: CPU %.1f%% (%.1f%% of %d logical CPUs), RAM %s (%.1f%% of %s RAM), %d processes, %d/%d agents resolved.\n",
+		report.CPUPercent,
+		report.HostCPUPercent,
+		report.LogicalCPUs,
+		formatIECBytes(report.RSSBytes),
+		ramPercent,
+		formatIECBytes(report.TotalMemoryBytes),
+		report.ProcessCount,
+		report.ResolvedAgents,
+		totalAgents,
+	)
+	fmt.Fprintln(out, "Note: RAM is summed RSS and can double-count shared pages; CPU may exceed 100% across cores.")
+	fmt.Fprintln(out, "Process arguments and prompts are not parsed, printed, or persisted.")
+	return nil
+}
+
+func valueOrDash(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return value
+}
+
+func formatIECBytes(bytes uint64) string {
+	const unit = uint64(1024)
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	divisor := unit
+	unitName := "KiB"
+	for _, candidate := range []string{"MiB", "GiB", "TiB", "PiB"} {
+		if bytes < divisor*unit {
+			break
+		}
+		divisor *= unit
+		unitName = candidate
+	}
+	value := float64(bytes) / float64(divisor)
+	if value >= 10 || value == float64(uint64(value)) {
+		return fmt.Sprintf("%.0f %s", value, unitName)
+	}
+	return fmt.Sprintf("%.1f %s", value, unitName)
 }
 
 func run(newTabMode, mobileMode bool) error {

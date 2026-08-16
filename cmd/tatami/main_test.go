@@ -2,16 +2,19 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OleksandrBesan/tatami/internal/agent"
 	"github.com/OleksandrBesan/tatami/internal/config"
 	"github.com/OleksandrBesan/tatami/internal/git"
+	"github.com/OleksandrBesan/tatami/internal/systemusage"
 	"github.com/OleksandrBesan/tatami/internal/tui"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
 )
@@ -330,6 +333,86 @@ func TestRunCLIRejectsMissingRunCommand(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "usage: tatami run <agent> [args...]") {
 		t.Fatalf("stderr = %q", errOut.String())
+	}
+}
+
+func TestRunCLIPrintsHerdrResourceUsage(t *testing.T) {
+	original := collectHerdrResources
+	collectHerdrResources = func() (systemusage.Report, error) {
+		return systemusage.Report{
+			Sessions: []systemusage.SessionUsage{{
+				Name: "agentic",
+				Agents: []systemusage.AgentUsage{
+					{
+						Kind: "claude", Status: "idle", CWD: "/repo", PaneID: "w2:p1", Resolved: true,
+						CPUPercent: 25, RSSBytes: 512 * 1024 * 1024, ProcessCount: 9, Age: 90 * time.Minute,
+					},
+					{
+						Kind: "codex", Status: "working", CWD: "/repo/worktree", PaneID: "w2:p2",
+						UnavailableReason: "process info unavailable: pane occupant changed",
+					},
+				},
+				CPUPercent: 25, RSSBytes: 512 * 1024 * 1024, ProcessCount: 9,
+			}},
+			CPUPercent:       25,
+			HostCPUPercent:   3.125,
+			RSSBytes:         512 * 1024 * 1024,
+			ProcessCount:     9,
+			TotalMemoryBytes: 16 * 1024 * 1024 * 1024,
+			LogicalCPUs:      8,
+			ResolvedAgents:   1,
+			UnresolvedAgents: 1,
+		}, nil
+	}
+	t.Cleanup(func() { collectHerdrResources = original })
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	if code := runCLI([]string{"resources"}, &out, &errOut); code != 0 {
+		t.Fatalf("runCLI code = %d, stderr = %q", code, errOut.String())
+	}
+	for _, want := range []string{
+		"SESSION", "agentic", "claude", "idle", "25.0%", "512 MiB", "9", "1h30m0s", "w2:p1", "/repo",
+		"codex", "unavailable", "pane occupant changed", "3.1% of 8 logical CPUs", "3.1% of 16 GiB RAM",
+		"1/2 agents resolved", "summed RSS", "CPU may exceed 100%", "not parsed, printed, or persisted",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("resource output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestRunCLIPrintsEmptyHerdrResourceUsage(t *testing.T) {
+	original := collectHerdrResources
+	collectHerdrResources = func() (systemusage.Report, error) {
+		return systemusage.Report{LogicalCPUs: 8, TotalMemoryBytes: 16 * 1024 * 1024 * 1024}, nil
+	}
+	t.Cleanup(func() { collectHerdrResources = original })
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	if code := runCLI([]string{"resources"}, &out, &errOut); code != 0 {
+		t.Fatalf("runCLI code = %d, stderr = %q", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "No running Herdr agents found") {
+		t.Fatalf("empty resource output = %q", out.String())
+	}
+}
+
+func TestRunCLIReportsHerdrResourceFailure(t *testing.T) {
+	original := collectHerdrResources
+	collectHerdrResources = func() (systemusage.Report, error) {
+		return systemusage.Report{}, errors.New("herdr socket unavailable")
+	}
+	t.Cleanup(func() { collectHerdrResources = original })
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	if code := runCLI([]string{"resources"}, &out, &errOut); code != 1 {
+		t.Fatalf("runCLI code = %d, want 1", code)
+	}
+	if !strings.Contains(errOut.String(), "herdr socket unavailable") {
+		t.Fatalf("resource stderr = %q", errOut.String())
 	}
 }
 

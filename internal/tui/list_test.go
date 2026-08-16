@@ -5,8 +5,10 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OleksandrBesan/tatami/internal/shell"
+	"github.com/OleksandrBesan/tatami/internal/systemusage"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -99,6 +101,64 @@ func TestNarrowHomeAutomaticallyUsesCompactRows(t *testing.T) {
 	}
 	if strings.Contains(view, "[1]") {
 		t.Fatalf("narrow desktop list unexpectedly enabled mobile number keys:\n%s", view)
+	}
+}
+
+func TestHighlightedHerdrSessionRendersResourceSummaryAboveHelp(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "project", Path: "/tmp/project"})
+	list := NewListViewWithHerdrSessions(store, func() ([]shell.HerdrSession, error) {
+		return []shell.HerdrSession{{Name: "agentic", Running: true}}, nil
+	})
+	for i, item := range list.items {
+		if item.Type == "herdr_session" {
+			list.cursor = i
+			break
+		}
+	}
+
+	list.SetHerdrUsageLoading("agentic")
+	if view := list.View(); !strings.Contains(view, "Usage  loading") {
+		t.Fatalf("loading summary missing:\n%s", view)
+	}
+
+	list.SetHerdrUsage("agentic", &systemusage.SessionUsage{
+		Name:         "agentic",
+		Agents:       []systemusage.AgentUsage{{}, {}},
+		CPUPercent:   37.5,
+		RSSBytes:     1536 * 1024 * 1024,
+		ProcessCount: 12,
+		MaxAge:       2*time.Hour + 15*time.Minute,
+	}, nil)
+	view := list.View()
+	for _, want := range []string{"Usage", "CPU 37.5%", "RAM 1.5 GiB", "PROCS 12", "AGENTS 2", "MAX AGE 2h15m"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("resource summary missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Index(view, "Usage") > strings.Index(view, "[enter]open") {
+		t.Fatalf("resource summary is not above help:\n%s", view)
+	}
+
+	list.SetHerdrUsage("agentic", nil, fmt.Errorf("pane changed"))
+	if view := list.View(); !strings.Contains(view, "Usage  unavailable: pane changed") {
+		t.Fatalf("resource error missing:\n%s", view)
+	}
+}
+
+func TestStoppedHerdrSessionRendersStoppedUsageWithoutLoadedSummary(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "project", Path: "/tmp/project"})
+	list := NewListViewWithHerdrSessions(store, func() ([]shell.HerdrSession, error) {
+		return []shell.HerdrSession{{Name: "old", Running: false}}, nil
+	})
+	for i, item := range list.items {
+		if item.Type == "herdr_session" {
+			list.cursor = i
+			break
+		}
+	}
+
+	if view := list.View(); !strings.Contains(view, "Usage  stopped") {
+		t.Fatalf("stopped usage state missing:\n%s", view)
 	}
 }
 
