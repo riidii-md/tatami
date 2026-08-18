@@ -3,6 +3,7 @@ package herdrhub
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -139,6 +140,10 @@ func TestExactQueryAndAttachArgs(t *testing.T) {
 	if err != nil || n != "ssh" || !reflect.DeepEqual(a, []string{"-o", "BatchMode=yes", "--", "oles@bmo.local", "herdr", "--session", "same", "agent", "list"}) {
 		t.Fatalf("agents %s %#v %v", n, a, err)
 	}
+	n, a, err = InteractiveQueryArgs(remote)
+	if err != nil || n != "ssh" || !reflect.DeepEqual(a, []string{"--", "oles@bmo.local", "herdr", "session", "list", "--json"}) {
+		t.Fatalf("interactive query %s %#v %v", n, a, err)
+	}
 }
 func TestParseAgentsAllowsOnlySafeFields(t *testing.T) {
 	agents, err := ParseAgents([]byte(`{"result":{"agents":[{"agent":"codex","agent_status":"working","cwd":"/safe","pane_id":"p","terminal":"SECRET"}]}}`))
@@ -166,6 +171,47 @@ type blockingExec struct{}
 func (blockingExec) Output(ctx context.Context, _ string, _ ...string) (ExecResult, error) {
 	<-ctx.Done()
 	return ExecResult{}, ctx.Err()
+}
+
+type fakeInteractiveExec struct {
+	stdin, stderr any
+	name          string
+	args          []string
+	out           []byte
+	err           error
+}
+
+func (f *fakeInteractiveExec) OutputInteractive(_ context.Context, stdin io.Reader, stderr io.Writer, name string, args ...string) (ExecResult, error) {
+	f.stdin = stdin
+	f.stderr = stderr
+	f.name = name
+	f.args = append([]string(nil), args...)
+	return ExecResult{Stdout: f.out}, f.err
+}
+
+func TestClientInteractiveQueryUsesTerminalIOAndParsesNamedSessions(t *testing.T) {
+	stdin := strings.NewReader("password input stays on terminal")
+	stderr := io.Discard
+	f := &fakeInteractiveExec{out: []byte(`{"sessions":[{"name":"default","running":true,"default":true},{"name":"agents","running":true}]}`)}
+	client := NewClientWithExecutors(&fakeExec{}, f)
+
+	sessions, err := client.QueryInteractive(context.Background(), Endpoint{ID: "work", Label: "Work", Target: "oles@bmo.local"}, stdin, stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.stdin != stdin || f.stderr != stderr {
+		t.Fatal("interactive query did not preserve terminal stdin/stderr")
+	}
+	if f.name != "ssh" || !reflect.DeepEqual(f.args, []string{"--", "oles@bmo.local", "herdr", "session", "list", "--json"}) {
+		t.Fatalf("interactive command = %s %#v", f.name, f.args)
+	}
+	want := []Session{
+		{SessionKey: SessionKey{EndpointID: "work", SessionName: "default"}, Running: true, Default: true},
+		{SessionKey: SessionKey{EndpointID: "work", SessionName: "agents"}, Running: true},
+	}
+	if !reflect.DeepEqual(sessions, want) {
+		t.Fatalf("sessions = %#v; want %#v", sessions, want)
+	}
 }
 
 func TestClientEndpointLocalErrors(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -363,7 +364,11 @@ type ExecResult struct{ Stdout, Stderr []byte }
 type Executor interface {
 	Output(context.Context, string, ...string) (ExecResult, error)
 }
+type InteractiveExecutor interface {
+	OutputInteractive(context.Context, io.Reader, io.Writer, string, ...string) (ExecResult, error)
+}
 type OSExecutor struct{}
+type OSInteractiveExecutor struct{}
 
 type boundedOutput struct {
 	data      []byte
@@ -398,13 +403,36 @@ func (OSExecutor) Output(ctx context.Context, name string, args ...string) (Exec
 	return ExecResult{Stdout: stdout.data, Stderr: stderr.data}, err
 }
 
-type Client struct{ exec Executor }
+func (OSInteractiveExecutor) OutputInteractive(ctx context.Context, stdin io.Reader, stderr io.Writer, name string, args ...string) (ExecResult, error) {
+	stdout := &boundedOutput{limit: 2 << 20}
+	command := exec.CommandContext(ctx, name, args...)
+	command.Stdin = stdin
+	command.Stdout = stdout
+	command.Stderr = stderr
+	err := command.Run()
+	if stdout.truncated && err == nil {
+		err = errors.New("Herdr inventory output exceeded 2 MiB")
+	}
+	return ExecResult{Stdout: stdout.data}, err
+}
+
+type Client struct {
+	exec        Executor
+	interactive InteractiveExecutor
+}
 
 func NewClient(e Executor) *Client {
+	return NewClientWithExecutors(e, nil)
+}
+
+func NewClientWithExecutors(e Executor, interactive InteractiveExecutor) *Client {
 	if e == nil {
 		e = OSExecutor{}
 	}
-	return &Client{exec: e}
+	if interactive == nil {
+		interactive = OSInteractiveExecutor{}
+	}
+	return &Client{exec: e, interactive: interactive}
 }
 func QueryArgs(e Endpoint) (string, []string, error) {
 	if e.ID == LocalEndpointID || e.Kind == EndpointLocal {
@@ -414,6 +442,15 @@ func QueryArgs(e Endpoint) (string, []string, error) {
 		return "", nil, err
 	}
 	return "ssh", []string{"-o", "BatchMode=yes", "--", e.Target, "herdr", "session", "list", "--json"}, nil
+}
+func InteractiveQueryArgs(e Endpoint) (string, []string, error) {
+	if e.ID == LocalEndpointID || e.Kind == EndpointLocal {
+		return "herdr", []string{"session", "list", "--json"}, nil
+	}
+	if err := ValidateEndpoint(e); err != nil {
+		return "", nil, err
+	}
+	return "ssh", []string{"--", e.Target, "herdr", "session", "list", "--json"}, nil
 }
 func AttachArgs(e Endpoint, session string) (string, []string, error) {
 	if strings.TrimSpace(session) == "" {
@@ -455,6 +492,17 @@ func (c *Client) QueryAgents(ctx context.Context, e Endpoint, session string) ([
 		return nil, fmt.Errorf("agent query %s: %s", stateForError(ctx, err, result.Stderr), "failed")
 	}
 	return ParseAgents(result.Stdout)
+}
+func (c *Client) QueryInteractive(ctx context.Context, e Endpoint, stdin io.Reader, stderr io.Writer) ([]Session, error) {
+	name, args, err := InteractiveQueryArgs(e)
+	if err != nil {
+		return nil, err
+	}
+	result, err := c.interactive.OutputInteractive(ctx, stdin, stderr, name, args...)
+	if err != nil {
+		return nil, fmt.Errorf("interactive endpoint query failed: %w", err)
+	}
+	return ParseSessions(e.ID, result.Stdout)
 }
 func ParseAgents(data []byte) ([]Agent, error) {
 	var response struct {

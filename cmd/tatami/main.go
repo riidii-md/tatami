@@ -231,18 +231,22 @@ func run(newTabMode, mobileMode bool) error {
 		appOptions = append(appOptions, tui.WithMobileMode())
 	}
 	appOptions = append(appOptions, tui.WithHerdrHubSnapshots(hubEndpoints, hubCache.Snapshots))
+	herdrHubClient := herdrhub.NewClient(nil)
 	var saveHubCache func(herdrhub.Cache) error
 	if hubCacheWritable {
 		saveHubCache = func(cache herdrhub.Cache) error { return herdrhub.SaveCache(paths.HerdrHubFile, cache) }
 	}
 	appOptions = append(appOptions, tui.WithHerdrHubRefresh(func(ctx context.Context, endpoints []herdrhub.Endpoint, previous herdrhub.Cache) []herdrhub.Snapshot {
-		return herdrhub.RefreshWithTimeout(ctx, herdrhub.NewClient(nil), endpoints, previous, 1, 5*time.Second)
+		return herdrhub.RefreshWithTimeout(ctx, herdrHubClient, endpoints, previous, 1, 5*time.Second)
 	}, saveHubCache))
 	appOptions = append(appOptions, tui.WithHerdrHubEndpointSaver(func(endpoints []herdrhub.Endpoint) error {
 		return herdrhub.NewStore(paths.HerdrHostsFile).Save(endpoints)
 	}))
 	appOptions = append(appOptions, tui.WithHerdrHubAgentQuery(func(ctx context.Context, endpoint herdrhub.Endpoint, session string) ([]herdrhub.Agent, error) {
-		return herdrhub.NewClient(nil).QueryAgents(ctx, endpoint, session)
+		return herdrHubClient.QueryAgents(ctx, endpoint, session)
+	}))
+	appOptions = append(appOptions, tui.WithHerdrHubInteractiveSessionLister(func(ctx context.Context, endpoint herdrhub.Endpoint, stdin io.Reader, stderr io.Writer) ([]herdrhub.Session, error) {
+		return herdrHubClient.QueryInteractive(ctx, endpoint, stdin, stderr)
 	}))
 	app := tui.NewApp(store, appOptions...)
 
