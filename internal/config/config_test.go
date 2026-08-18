@@ -23,6 +23,9 @@ func TestGetPathsSeparatesConfigAndPrivateRuntimeState(t *testing.T) {
 	if paths.AgentsDir != filepath.Join(stateHome, "tatami", "agents") {
 		t.Fatalf("AgentsDir = %q", paths.AgentsDir)
 	}
+	if paths.HerdrHostsFile != filepath.Join(configHome, "tatami", "herdr-hosts.json") || paths.HerdrHubFile != filepath.Join(stateHome, "tatami", "herdr-hub.json") {
+		t.Fatalf("unexpected Herdr hub paths: %#v", paths)
+	}
 	info, err := os.Stat(paths.StateDir)
 	if err != nil {
 		t.Fatalf("stat state directory: %v", err)

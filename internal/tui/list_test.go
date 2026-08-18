@@ -1,17 +1,105 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/OleksandrBesan/tatami/internal/herdrhub"
 	"github.com/OleksandrBesan/tatami/internal/shell"
 	"github.com/OleksandrBesan/tatami/internal/systemusage"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+func TestListViewShowsCachedRemoteSessionsWithEndpointIdentity(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "local", Path: t.TempDir()})
+	view := NewListViewWithHerdrSessions(store, func() ([]shell.HerdrSession, error) { return nil, nil })
+	view.SetHerdrHubSnapshots([]herdrhub.Endpoint{{ID: "work", Label: "Workbox", Target: "work"}}, []herdrhub.Snapshot{{EndpointID: "work", Sessions: []herdrhub.Session{{SessionKey: herdrhub.SessionKey{EndpointID: "work", SessionName: "same"}, Running: true}}}})
+	view.SetSize(100, 40)
+	if !strings.Contains(view.View(), "Herdr · Workbox") || !strings.Contains(view.View(), "same") {
+		t.Fatalf("hub not rendered: %s", view.View())
+	}
+	view.filtering = true
+	view.filter.SetValue("workbox")
+	view.refreshItems()
+	if got := view.Selected(); got == nil || got.Endpoint == nil || got.Endpoint.ID != "work" {
+		t.Fatalf("filtered selection = %#v", got)
+	}
+}
+
+func TestHubEndpointStatusShowsLatencyAndLastSuccessAge(t *testing.T) {
+	now := time.Now()
+	if got := hubEndpointStatus(herdrhub.Snapshot{State: herdrhub.StateOnline, Latency: 24 * time.Millisecond}); got != "online · 24ms" {
+		t.Fatalf("online status = %q", got)
+	}
+	got := hubEndpointStatus(herdrhub.Snapshot{State: herdrhub.StateStale, LastSuccess: now.Add(-8 * time.Minute)})
+	if !strings.Contains(got, "stale · last seen 8m") {
+		t.Fatalf("stale status = %q", got)
+	}
+}
+
+func TestHubAuthenticationNeededShowsPasswordlessSSHSetup(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "local", Path: t.TempDir()})
+	view := NewListViewWithHerdrSessions(store, func() ([]shell.HerdrSession, error) { return nil, nil })
+	endpoint := herdrhub.Endpoint{ID: "macmini", Label: "Mac Mini", Target: "oles@bmo.local"}
+	view.SetHerdrHubSnapshots([]herdrhub.Endpoint{endpoint}, []herdrhub.Snapshot{{EndpointID: endpoint.ID, State: herdrhub.StateAuthenticationNeeded}})
+	view.SetSize(100, 40)
+
+	for i, item := range view.items {
+		if item.Type == "herdr_endpoint" && item.Endpoint != nil && item.Endpoint.ID == endpoint.ID {
+			view.cursor = i
+		}
+	}
+	got := view.View()
+	for _, want := range []string{
+		"OpenSSH will ask for password or key passphrase",
+		"Background refresh needs non-interactive SSH",
+		"ssh-add ~/.ssh/<private-key>",
+		"ssh-copy-id oles@bmo.local",
+		"ssh -o BatchMode=yes oles@bmo.local true",
+		"[enter]open/authenticate",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("authentication guidance missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestHubAuthenticationGuidanceDoesNotEchoUnsafeTarget(t *testing.T) {
+	endpoint := &herdrhub.Endpoint{ID: "macmini", Label: "Mac Mini", Target: "host\nunsafe"}
+	got := hubAuthenticationGuidance(endpoint, herdrhub.Snapshot{State: herdrhub.StateAuthenticationNeeded})
+	if strings.Contains(got, endpoint.Target) || strings.Contains(got, "ssh-copy-id") {
+		t.Fatalf("unsafe target exposed in authentication command: %q", got)
+	}
+}
+
+func TestHubFilterIncludesLocalAndRemoteSessions(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "local", Path: t.TempDir()})
+	view := NewListViewWithHerdrSessions(store, func() ([]shell.HerdrSession, error) { return []shell.HerdrSession{{Name: "local-match"}}, nil })
+	view.SetHerdrHubSnapshots([]herdrhub.Endpoint{{ID: "work", Label: "Work", Target: "work"}}, []herdrhub.Snapshot{{EndpointID: "work", Sessions: []herdrhub.Session{{SessionKey: herdrhub.SessionKey{EndpointID: "work", SessionName: "remote-match"}}}}})
+	view.filtering = true
+	view.filter.SetValue("match")
+	view.refreshItems()
+	if len(view.items) != 2 {
+		t.Fatalf("filter items=%#v", view.items)
+	}
+}
+
+func TestHubShowsLocalOfflineWhenLocalInventoryFails(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "local", Path: t.TempDir()})
+	view := NewListViewWithHerdrSessions(store, func() ([]shell.HerdrSession, error) {
+		return nil, errors.New("socket unavailable")
+	})
+	view.SetHerdrHubSnapshots([]herdrhub.Endpoint{{ID: "work", Label: "Work", Target: "work"}}, nil)
+	got := view.View()
+	if !strings.Contains(got, "Herdr Hub") || !strings.Contains(got, "This Mac · offline") || !strings.Contains(got, "Work · loading") {
+		t.Fatalf("failed local inventory hub=%s", got)
+	}
+}
 
 func TestHomeGroupsTatamiProjectsBeforeSeparateHerdrSessions(t *testing.T) {
 	store := newTestStore(t, &workspace.Workspace{
@@ -38,7 +126,8 @@ func TestHomeGroupsTatamiProjectsBeforeSeparateHerdrSessions(t *testing.T) {
 		"header:Tatami Projects",
 		"folder:team",
 		"workspace:root-project",
-		"header:Herdr Sessions",
+		"header:Herdr Hub",
+		"herdr_endpoint:▾ Herdr · This Mac · online",
 		"herdr_session:default",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -48,7 +137,7 @@ func TestHomeGroupsTatamiProjectsBeforeSeparateHerdrSessions(t *testing.T) {
 	list.SetSize(48, 40)
 	view := list.View()
 	if strings.Index(view, "Quick Access") > strings.Index(view, "Tatami Projects") ||
-		strings.Index(view, "Tatami Projects") > strings.Index(view, "Herdr Sessions") {
+		strings.Index(view, "Tatami Projects") > strings.Index(view, "Herdr · This Mac") {
 		t.Fatalf("rendered home sections are out of order:\n%s", view)
 	}
 	if !strings.Contains(view, strings.Repeat("─", 44)) {

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/OleksandrBesan/tatami/internal/herdrhub"
 	"github.com/OleksandrBesan/tatami/internal/shell"
 	"github.com/OleksandrBesan/tatami/internal/systemusage"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
@@ -20,25 +21,96 @@ type ListItem struct {
 	Name      string
 	Workspace *workspace.Workspace
 	Herdr     *shell.HerdrSession
+	Endpoint  *herdrhub.Endpoint
 }
 
 // ListView displays the list of workspaces
 type ListView struct {
-	store         *workspace.Store
-	items         []ListItem
-	cursor        int
-	currentFolder string // Current folder path (empty = root)
-	filter        textinput.Model
-	filtering     bool
-	inZellij      bool
-	width         int
-	height        int
-	mobileMode    bool
-	herdrSessions herdrSessionLister
-	herdrUsage    *systemusage.SessionUsage
-	herdrUsageFor string
-	herdrUsageErr error
-	herdrLoading  bool
+	store            *workspace.Store
+	items            []ListItem
+	cursor           int
+	currentFolder    string // Current folder path (empty = root)
+	filter           textinput.Model
+	filtering        bool
+	inZellij         bool
+	width            int
+	height           int
+	mobileMode       bool
+	herdrSessions    herdrSessionLister
+	herdrUsage       *systemusage.SessionUsage
+	herdrUsageFor    string
+	herdrUsageErr    error
+	herdrLoading     bool
+	hubSnapshots     []herdrhub.Snapshot
+	hubEndpoints     map[string]herdrhub.Endpoint
+	hubEndpointOrder []herdrhub.Endpoint
+	hubCollapsed     map[string]bool
+	hubAgents        map[string][]herdrhub.Agent
+	hubAgentErr      map[string]error
+	hubAgentLoading  map[string]bool
+}
+
+func hubSessionKey(endpoint, session string) string { return endpoint + "\x00" + session }
+func (l *ListView) SetHerdrHubAgents(endpoint, session string, agents []herdrhub.Agent, err error) {
+	if l.hubAgents == nil {
+		l.hubAgents = map[string][]herdrhub.Agent{}
+		l.hubAgentErr = map[string]error{}
+		l.hubAgentLoading = map[string]bool{}
+	}
+	key := hubSessionKey(endpoint, session)
+	l.hubAgents[key] = agents
+	l.hubAgentErr[key] = err
+	l.hubAgentLoading[key] = false
+	l.refreshItems()
+}
+
+func (l *ListView) SetHerdrHubAgentsLoading(endpoint, session string) {
+	if l.hubAgents == nil {
+		l.hubAgents = map[string][]herdrhub.Agent{}
+		l.hubAgentErr = map[string]error{}
+		l.hubAgentLoading = map[string]bool{}
+	}
+	key := hubSessionKey(endpoint, session)
+	delete(l.hubAgents, key)
+	delete(l.hubAgentErr, key)
+	l.hubAgentLoading[key] = true
+	l.refreshItems()
+}
+
+// SetHerdrHubSnapshots supplies cached endpoint inventory. Local sessions keep
+// their existing source and controls; remote rows are attach-only.
+func (l *ListView) SetHerdrHubSnapshots(endpoints []herdrhub.Endpoint, snapshots []herdrhub.Snapshot) {
+	selectedEndpoint, selectedSession := "", ""
+	if selected := l.Selected(); selected != nil && selected.Herdr != nil {
+		selectedSession = selected.Herdr.Name
+		if selected.Endpoint != nil {
+			selectedEndpoint = selected.Endpoint.ID
+		}
+	}
+	l.hubEndpoints = make(map[string]herdrhub.Endpoint, len(endpoints))
+	l.hubEndpointOrder = append([]herdrhub.Endpoint(nil), endpoints...)
+	for _, endpoint := range endpoints {
+		l.hubEndpoints[endpoint.ID] = endpoint
+	}
+	if l.hubCollapsed == nil {
+		l.hubCollapsed = make(map[string]bool)
+	}
+	l.hubSnapshots = append([]herdrhub.Snapshot(nil), snapshots...)
+	l.refreshItems()
+	if selectedSession != "" {
+		for i, item := range l.items {
+			if item.Herdr != nil && item.Herdr.Name == selectedSession {
+				endpoint := herdrhub.LocalEndpointID
+				if item.Endpoint != nil {
+					endpoint = item.Endpoint.ID
+				}
+				if endpoint == selectedEndpoint {
+					l.cursor = i
+					break
+				}
+			}
+		}
+	}
 }
 
 // NewListView creates a new list view
@@ -78,6 +150,21 @@ func (l *ListView) refreshItems() {
 				l.items = append(l.items, ListItem{Type: "workspace", Name: ws.Name, Workspace: &wsCopy})
 			}
 		}
+		if l.herdrSessions != nil {
+			if sessions, err := l.herdrSessions(); err == nil {
+				for _, session := range sessions {
+					if strings.Contains(strings.ToLower(session.Name), query) {
+						copy := session
+						l.items = append(l.items, ListItem{Type: "herdr_session", Name: session.Name, Herdr: &copy})
+					}
+				}
+			}
+		}
+		l.appendHubItems(query, true)
+		if l.cursor >= len(l.items) {
+			l.cursor = max(0, len(l.items)-1)
+		}
+		l.skipHeaders(1)
 		return
 	}
 
@@ -112,14 +199,25 @@ func (l *ListView) refreshItems() {
 		// Herdr is a separate runtime/session group after Tatami's saved projects.
 		if l.herdrSessions != nil {
 			sessions, err := l.herdrSessions()
-			if err == nil && len(sessions) > 0 {
-				l.items = append(l.items, ListItem{Type: "header", Name: "Herdr Sessions"})
+			l.items = append(l.items, ListItem{Type: "header", Name: "Herdr Hub"})
+			local := herdrhub.LocalEndpoint()
+			prefix := "▾ "
+			if l.hubCollapsed[herdrhub.LocalEndpointID] {
+				prefix = "▸ "
+			}
+			state := herdrhub.StateOnline
+			if err != nil {
+				state = herdrhub.StateOffline
+			}
+			l.items = append(l.items, ListItem{Type: "herdr_endpoint", Name: prefix + "Herdr · This Mac · " + string(state), Endpoint: &local})
+			if err == nil && !l.hubCollapsed[herdrhub.LocalEndpointID] {
 				for _, session := range sessions {
 					sessionCopy := session
 					l.items = append(l.items, ListItem{Type: "herdr_session", Name: session.Name, Herdr: &sessionCopy})
 				}
 			}
 		}
+		l.appendHubItems("", false)
 	} else {
 		// Inside a folder
 		// Back option
@@ -146,6 +244,102 @@ func (l *ListView) refreshItems() {
 	}
 	// Skip headers
 	l.skipHeaders(1)
+}
+
+func (l *ListView) appendHubItems(query string, flat bool) {
+	snapshots := make(map[string]herdrhub.Snapshot, len(l.hubSnapshots))
+	for _, snapshot := range l.hubSnapshots {
+		snapshots[snapshot.EndpointID] = snapshot
+	}
+	for _, endpoint := range l.hubEndpointOrder {
+		if endpoint.ID == herdrhub.LocalEndpointID {
+			continue
+		}
+		snapshot, ok := snapshots[endpoint.ID]
+		if !ok {
+			snapshot = herdrhub.Snapshot{EndpointID: endpoint.ID, State: herdrhub.StateLoading}
+		}
+		if !flat {
+			prefix := "▾ "
+			if l.hubCollapsed[endpoint.ID] {
+				prefix = "▸ "
+			}
+			endpointCopy := endpoint
+			l.items = append(l.items, ListItem{Type: "herdr_endpoint", Name: prefix + "Herdr · " + endpoint.Label + " · " + hubEndpointStatus(snapshot), Endpoint: &endpointCopy})
+			if l.hubCollapsed[endpoint.ID] {
+				continue
+			}
+		}
+		for _, session := range snapshot.Sessions {
+			agentText := ""
+			for _, agent := range l.hubAgents[hubSessionKey(endpoint.ID, session.SessionName)] {
+				agentText += " " + agent.Kind + " " + agent.Status + " " + agent.CWD
+			}
+			if query != "" && !strings.Contains(strings.ToLower(endpoint.Label+" "+endpoint.ID+" "+session.SessionName+agentText), query) {
+				continue
+			}
+			copy := shell.HerdrSession{Name: session.SessionName, Running: session.Running, Default: session.Default}
+			endpointCopy := endpoint
+			name := session.SessionName
+			if flat {
+				name += " · " + endpoint.Label
+			}
+			l.items = append(l.items, ListItem{Type: "herdr_session", Name: name, Herdr: &copy, Endpoint: &endpointCopy})
+		}
+	}
+}
+
+func hubEndpointStatus(snapshot herdrhub.Snapshot) string {
+	status := string(snapshot.State)
+	if snapshot.State == herdrhub.StateOnline && snapshot.Latency > 0 {
+		status += " · " + snapshot.Latency.Round(time.Millisecond).String()
+	}
+	if (snapshot.State == herdrhub.StateStale || snapshot.State == herdrhub.StateOffline) && !snapshot.LastSuccess.IsZero() {
+		age := time.Since(snapshot.LastSuccess)
+		if age < 0 {
+			age = 0
+		}
+		status += " · last seen " + formatUsageAge(age)
+	}
+	return status
+}
+
+func hubAuthenticationGuidance(endpoint *herdrhub.Endpoint, snapshot herdrhub.Snapshot) string {
+	if endpoint == nil || snapshot.State != herdrhub.StateAuthenticationNeeded {
+		return ""
+	}
+	if err := herdrhub.ValidateEndpoint(*endpoint); err != nil {
+		return "SSH authentication required. Edit this host and enter a valid destination."
+	}
+	return "[enter]open/authenticate — OpenSSH will ask for password or key passphrase\n" +
+		"Background refresh needs non-interactive SSH\n" +
+		"Encrypted key: ssh-add ~/.ssh/<private-key>\n" +
+		"Install key: ssh-copy-id " + endpoint.Target + "\n" +
+		"Verify refresh: ssh -o BatchMode=yes " + endpoint.Target + " true"
+}
+
+func (l *ListView) herdrEndpointGuidanceView() string {
+	selected := l.Selected()
+	if selected == nil || selected.Type != "herdr_endpoint" || selected.Endpoint == nil {
+		return ""
+	}
+	for _, snapshot := range l.hubSnapshots {
+		if snapshot.EndpointID == selected.Endpoint.ID {
+			return hubAuthenticationGuidance(selected.Endpoint, snapshot)
+		}
+	}
+	return ""
+}
+
+func (l *ListView) ToggleHerdrEndpoint(id string) {
+	if id == "" {
+		return
+	}
+	if l.hubCollapsed == nil {
+		l.hubCollapsed = make(map[string]bool)
+	}
+	l.hubCollapsed[id] = !l.hubCollapsed[id]
+	l.refreshItems()
 }
 
 func (l *ListView) skipHeaders(direction int) {
@@ -445,6 +639,24 @@ func (l *ListView) View() string {
 				}
 				b.WriteString(labelStyle.Render(item.Name))
 				b.WriteString("\n")
+			case "herdr_endpoint":
+				if strings.Contains(item.Name, "This Mac") {
+					dividerWidth := l.width - 4
+					if dividerWidth < 24 {
+						dividerWidth = 40
+					}
+					if dividerWidth > 52 {
+						dividerWidth = 52
+					}
+					b.WriteString(mutedStyle.Render(strings.Repeat("─", dividerWidth)))
+					b.WriteString("\n")
+				}
+				style := normalStyle
+				if i == l.cursor {
+					style = selectedStyle
+				}
+				b.WriteString(style.Render(item.Name))
+				b.WriteString("\n")
 
 			case "folder":
 				cursor := choicePrefix(l.mobileMode, l.visibleOrdinal(i, start), i == l.cursor)
@@ -520,6 +732,11 @@ func (l *ListView) View() string {
 		b.WriteString(usage)
 		b.WriteString("\n")
 	}
+	if guidance := l.herdrEndpointGuidanceView(); guidance != "" {
+		b.WriteString("\n")
+		b.WriteString(errorStyle.Render(guidance))
+		b.WriteString("\n")
+	}
 
 	// Help text
 	var help string
@@ -528,18 +745,40 @@ func (l *ListView) View() string {
 		if l.currentFolder != "" {
 			help += "  [b]back"
 		}
-		if selected := l.Selected(); selected != nil && selected.Type == "herdr_session" {
+		if selected := l.Selected(); selected != nil && selected.Type == "herdr_endpoint" && selected.Endpoint != nil {
+			help = "[↑↓/1-9]select  [enter/space]collapse  [r]refresh"
+			if selected.Endpoint.ID != herdrhub.LocalEndpointID {
+				help = "[↑↓/1-9]select  [enter]open  [space]collapse  [r]refresh"
+				help += "\n[e]edit [d]remove [a]add [/]filter [q]uit"
+			} else {
+				help += "\n[a]add [/]filter [q]uit"
+			}
+		} else if selected != nil && selected.Type == "herdr_session" && selected.Endpoint == nil {
 			if selected.Herdr != nil && selected.Herdr.Running {
 				help += "\n[x]stop  [q]uit"
 			} else if selected.Herdr != nil && !selected.Herdr.Default && selected.Name != "default" {
 				help += "\n[x]delete  [q]uit"
+			}
+		} else if selected != nil && selected.Type == "herdr_session" {
+			if selected.Herdr != nil && selected.Herdr.Running {
+				help = "[↑↓/1-9]select  [enter]open remote session\n[r]refresh [/]filter [q]uit"
+			} else {
+				help = "[↑↓/1-9]select  [enter]restore remote session\n[r]refresh [/]filter [q]uit"
 			}
 		} else {
 			help += "\n[n]ew [e]dit [d]elete [*]star [/]filter [q]uit"
 		}
 	} else if l.filtering {
 		help = "[enter]confirm  [esc]cancel"
-	} else if selected := l.Selected(); selected != nil && selected.Type == "herdr_session" {
+	} else if selected := l.Selected(); selected != nil && selected.Type == "herdr_endpoint" && selected.Endpoint != nil {
+		help = "[enter/space]collapse  [r]refresh  [R]refresh all  [a]add"
+		if selected.Endpoint.ID != herdrhub.LocalEndpointID {
+			help = "[enter]open/authenticate  [space]collapse  [r]refresh  [R]refresh all  [a]add"
+			help += "  [e]edit  [d]remove"
+		}
+		help += "  [/]filter  [q]uit"
+	} else if selected := l.Selected(); selected != nil && selected.Type == "herdr_session" && selected.Endpoint == nil {
+		// local-only controls below
 		switch {
 		case selected.Herdr != nil && selected.Herdr.Running:
 			help = "[enter]open  [x]stop  [q]uit"
@@ -547,6 +786,12 @@ func (l *ListView) View() string {
 			help = "[enter]open  built-in session  [q]uit"
 		default:
 			help = "[enter]open  [x]delete  [q]uit"
+		}
+	} else if selected := l.Selected(); selected != nil && selected.Type == "herdr_session" {
+		if selected.Herdr != nil && selected.Herdr.Running {
+			help = "[enter]open remote session  [r]refresh  [q]uit"
+		} else {
+			help = "[enter]restore remote session  [r]refresh  [q]uit"
 		}
 	} else if l.currentFolder != "" {
 		help = "[h/←]back  [n]ew  [e]dit  [d]elete  [*]star  [q]uit"
@@ -568,6 +813,24 @@ func (l *ListView) herdrUsageView() string {
 	selected := l.Selected()
 	if selected == nil || selected.Type != "herdr_session" || selected.Herdr == nil {
 		return ""
+	}
+	if selected.Endpoint != nil {
+		if !selected.Herdr.Running {
+			return labelStyle.Render("Usage") + mutedStyle.Render("  stopped")
+		}
+		key := hubSessionKey(selected.Endpoint.ID, selected.Herdr.Name)
+		agents, known := l.hubAgents[key]
+		summary := "  agents loading…"
+		if known && !l.hubAgentLoading[key] {
+			summary = fmt.Sprintf("  %d agents", len(agents))
+		}
+		if len(agents) > 0 {
+			summary += " · " + agents[0].Status
+		}
+		if l.hubAgentErr[key] != nil {
+			summary = "  agents unavailable"
+		}
+		return labelStyle.Render("Usage") + mutedStyle.Render("  CPU unavailable  RAM unavailable  MAX AGE unavailable"+summary)
 	}
 	if !selected.Herdr.Running {
 		return labelStyle.Render("Usage") + mutedStyle.Render("  stopped")

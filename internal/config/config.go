@@ -8,6 +8,8 @@ import (
 const (
 	configDirName  = "tatami"
 	workspacesFile = "workspaces.json"
+	herdrHostsFile = "herdr-hosts.json"
+	herdrHubFile   = "herdr-hub.json"
 	agentsDirName  = "agents"
 )
 
@@ -17,6 +19,8 @@ type Paths struct {
 	WorkspacesFile string
 	StateDir       string
 	AgentsDir      string
+	HerdrHostsFile string
+	HerdrHubFile   string
 }
 
 // GetPaths returns the configuration paths, creating directories if needed
@@ -56,5 +60,7 @@ func GetPaths() (*Paths, error) {
 		WorkspacesFile: filepath.Join(configDir, workspacesFile),
 		StateDir:       stateDir,
 		AgentsDir:      filepath.Join(stateDir, agentsDirName),
+		HerdrHostsFile: filepath.Join(configDir, herdrHostsFile),
+		HerdrHubFile:   filepath.Join(stateDir, herdrHubFile),
 	}, nil
 }
