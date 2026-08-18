@@ -14,6 +14,7 @@ import (
 	"github.com/OleksandrBesan/tatami/internal/agent"
 	"github.com/OleksandrBesan/tatami/internal/config"
 	"github.com/OleksandrBesan/tatami/internal/git"
+	"github.com/OleksandrBesan/tatami/internal/herdrhub"
 	"github.com/OleksandrBesan/tatami/internal/systemusage"
 	"github.com/OleksandrBesan/tatami/internal/tui"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
@@ -228,6 +229,55 @@ func TestParseLaunchOptionsEnablesMobileAndNewTabModes(t *testing.T) {
 	shortMobileOptions := parseLaunchOptions([]string{"-m"})
 	if !shortMobileOptions.mobileMode {
 		t.Fatal("-m did not enable mobile mode")
+	}
+}
+
+func TestLoadHerdrHubRejectsCorruptHostsWithoutChangingThem(t *testing.T) {
+	dir := t.TempDir()
+	hosts := filepath.Join(dir, "hosts.json")
+	cache := filepath.Join(dir, "cache.json")
+	if err := os.WriteFile(hosts, []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, err := loadHerdrHub(&config.Paths{HerdrHostsFile: hosts, HerdrHubFile: cache})
+	if err == nil || !strings.Contains(err.Error(), "not modified") {
+		t.Fatalf("load error = %v", err)
+	}
+	got, readErr := os.ReadFile(hosts)
+	if readErr != nil || string(got) != "{" {
+		t.Fatalf("corrupt hosts changed: %q, %v", got, readErr)
+	}
+}
+
+func TestLoadHerdrHubPreservesCorruptCache(t *testing.T) {
+	dir := t.TempDir()
+	hosts := filepath.Join(dir, "hosts.json")
+	cache := filepath.Join(dir, "cache.json")
+	if err := os.WriteFile(cache, []byte("not-json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	endpoints, snapshot, writable, err := loadHerdrHub(&config.Paths{HerdrHostsFile: hosts, HerdrHubFile: cache})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(endpoints) != 1 || endpoints[0].ID != herdrhub.LocalEndpointID || len(snapshot.Snapshots) != 0 || writable {
+		t.Fatalf("load result endpoints=%#v cache=%#v writable=%v", endpoints, snapshot, writable)
+	}
+	got, readErr := os.ReadFile(cache)
+	if readErr != nil || string(got) != "not-json" {
+		t.Fatalf("corrupt cache changed: %q, %v", got, readErr)
+	}
+}
+
+func TestHandleResultRejectsUnsafeRemoteSession(t *testing.T) {
+	err := handleResult(&tui.Result{
+		Action:          tui.ActionAttachHerdrSession,
+		SessionName:     "safe;touch",
+		HerdrEndpointID: "work",
+		HerdrTarget:     "work",
+	}, false)
+	if err == nil || !strings.Contains(err.Error(), "unsupported characters") {
+		t.Fatalf("unsafe remote session error = %v", err)
 	}
 }
 

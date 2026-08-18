@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"os/exec"
 	"path/filepath"
 	"reflect"
@@ -10,11 +12,361 @@ import (
 
 	"github.com/OleksandrBesan/tatami/internal/config"
 	"github.com/OleksandrBesan/tatami/internal/git"
+	"github.com/OleksandrBesan/tatami/internal/herdrhub"
 	"github.com/OleksandrBesan/tatami/internal/shell"
 	"github.com/OleksandrBesan/tatami/internal/systemusage"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+func TestRemoteAgentDetailUsesCompositeSelectionAndFailureKeepsAttachable(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "local", Path: t.TempDir()})
+	endpoint := herdrhub.Endpoint{ID: "work", Label: "Work", Target: "work"}
+	app := NewApp(store, withoutHerdrSessions(), WithHerdrHubSnapshots([]herdrhub.Endpoint{herdrhub.LocalEndpoint(), endpoint}, []herdrhub.Snapshot{{EndpointID: "work", State: herdrhub.StateOnline, Sessions: []herdrhub.Session{{SessionKey: herdrhub.SessionKey{EndpointID: "work", SessionName: "same"}, Running: true}}}}), WithHerdrHubAgentQuery(func(context.Context, herdrhub.Endpoint, string) ([]herdrhub.Agent, error) {
+		return []herdrhub.Agent{{Kind: "codex", Status: "working", CWD: "/repo"}}, nil
+	}))
+	for i, item := range app.listView.items {
+		if item.Herdr != nil && item.Endpoint != nil && item.Endpoint.ID == "work" {
+			app.listView.cursor = i
+			break
+		}
+	}
+	cmd := app.scheduleSelectedHubAgents()
+	if !strings.Contains(app.listView.View(), "agents loading") {
+		t.Fatalf("remote detail did not enter loading state: %s", app.listView.View())
+	}
+	msg := cmd()
+	app.Update(msg)
+	if !strings.Contains(app.listView.View(), "1 agents") || !strings.Contains(app.listView.View(), "working") {
+		t.Fatalf("remote detail missing: %s", app.listView.View())
+	}
+	app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if app.result == nil || app.result.HerdrEndpointID != "work" || app.result.SessionName != "same" {
+		t.Fatalf("result=%#v", app.result)
+	}
+}
+
+func TestLocalHubCollapseAndRefresh(t *testing.T) {
+	calls := 0
+	store := newTestStore(t, &workspace.Workspace{Name: "local", Path: t.TempDir()})
+	app := NewApp(store, WithHerdrSessionLister(func() ([]shell.HerdrSession, error) { calls++; return []shell.HerdrSession{{Name: "local"}}, nil }))
+	for i, item := range app.listView.items {
+		if item.Type == "herdr_endpoint" && item.Endpoint.ID == herdrhub.LocalEndpointID {
+			app.listView.cursor = i
+		}
+	}
+	app.Update(tea.KeyMsg{Type: tea.KeySpace})
+	if strings.Contains(app.listView.View(), "local stopped") {
+		t.Fatal("local children remain after collapse")
+	}
+	app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if calls < 2 {
+		t.Fatalf("local r calls=%d", calls)
+	}
+}
+
+func TestLocalSessionRefreshDoesNotQueryRemoteEndpoints(t *testing.T) {
+	localCalls := 0
+	remoteCalls := 0
+	store := newTestStore(t, &workspace.Workspace{Name: "local", Path: t.TempDir()})
+	remote := herdrhub.Endpoint{ID: "work", Label: "Work", Target: "work"}
+	app := NewApp(store,
+		WithHerdrSessionLister(func() ([]shell.HerdrSession, error) {
+			localCalls++
+			return []shell.HerdrSession{{Name: "local", Running: true}}, nil
+		}),
+		WithHerdrHubSnapshots([]herdrhub.Endpoint{herdrhub.LocalEndpoint(), remote}, nil),
+		WithHerdrHubRefresh(func(context.Context, []herdrhub.Endpoint, herdrhub.Cache) []herdrhub.Snapshot {
+			remoteCalls++
+			return nil
+		}, nil),
+	)
+	for i, item := range app.listView.items {
+		if item.Herdr != nil && item.Endpoint == nil {
+			app.listView.cursor = i
+			break
+		}
+	}
+	before := localCalls
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if cmd != nil || remoteCalls != 0 || localCalls <= before {
+		t.Fatalf("local refresh cmd=%v local=%d/%d remote=%d", cmd, localCalls, before, remoteCalls)
+	}
+}
+
+func TestRemoteRefreshKeysUseSelectedAndAllEndpointsAndCancel(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "local", Path: t.TempDir()})
+	work := herdrhub.Endpoint{ID: "work", Label: "Work", Target: "work"}
+	gpu := herdrhub.Endpoint{ID: "gpu", Label: "GPU", Target: "gpu"}
+	var calls [][]herdrhub.Endpoint
+	var first context.Context
+	localCalls := 0
+	app := NewApp(store, WithHerdrSessionLister(func() ([]shell.HerdrSession, error) {
+		localCalls++
+		return nil, nil
+	}), WithHerdrHubSnapshots([]herdrhub.Endpoint{herdrhub.LocalEndpoint(), work, gpu}, []herdrhub.Snapshot{
+		{EndpointID: "work", Sessions: []herdrhub.Session{{SessionKey: herdrhub.SessionKey{EndpointID: "work", SessionName: "run"}, Running: true}}},
+		{EndpointID: "gpu", Sessions: []herdrhub.Session{{SessionKey: herdrhub.SessionKey{EndpointID: "gpu", SessionName: "other"}, Running: true}}},
+	}), WithHerdrHubRefresh(func(ctx context.Context, eps []herdrhub.Endpoint, _ herdrhub.Cache) []herdrhub.Snapshot {
+		if first == nil {
+			first = ctx
+		}
+		calls = append(calls, eps)
+		return []herdrhub.Snapshot{{EndpointID: eps[0].ID, State: herdrhub.StateOnline}}
+	}, nil))
+	for i, item := range app.listView.items {
+		if item.Herdr != nil && item.Endpoint != nil && item.Endpoint.ID == "work" {
+			app.listView.cursor = i
+			break
+		}
+	}
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	msg := cmd()
+	app.Update(msg)
+	if len(calls) != 1 || len(calls[0]) != 1 || calls[0][0].ID != "work" {
+		t.Fatalf("selected refresh=%#v", calls)
+	}
+	if len(app.hubSnapshots) != 2 || app.hubSnapshots[1].EndpointID != "gpu" {
+		t.Fatalf("selected refresh discarded other endpoint: %#v", app.hubSnapshots)
+	}
+	beforeAllLocalCalls := localCalls
+	_, cmd = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	batchMsg := cmd()
+	batch, ok := batchMsg.(tea.BatchMsg)
+	if !ok || len(batch) != 2 {
+		t.Fatalf("R command = %T, want two endpoint commands", batchMsg)
+	}
+	for _, endpointCmd := range batch {
+		app.Update(endpointCmd())
+	}
+	if len(calls) != 3 || len(calls[1]) != 1 || len(calls[2]) != 1 {
+		t.Fatalf("all refresh=%#v", calls)
+	}
+	if localCalls <= beforeAllLocalCalls {
+		t.Fatal("R did not refresh visible local sessions")
+	}
+	if first.Err() == nil {
+		t.Fatal("older refresh was not cancelled")
+	}
+}
+
+func TestHealthyEndpointResultDoesNotWaitForSlowEndpoint(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "local", Path: t.TempDir()})
+	slow := herdrhub.Endpoint{ID: "slow", Label: "Slow", Target: "slow"}
+	fast := herdrhub.Endpoint{ID: "fast", Label: "Fast", Target: "fast"}
+	releaseSlow := make(chan struct{})
+	app := NewApp(store,
+		withoutHerdrSessions(),
+		WithHerdrHubSnapshots([]herdrhub.Endpoint{herdrhub.LocalEndpoint(), slow, fast}, nil),
+		WithHerdrHubRefresh(func(_ context.Context, endpoints []herdrhub.Endpoint, _ herdrhub.Cache) []herdrhub.Snapshot {
+			endpoint := endpoints[0]
+			if endpoint.ID == "slow" {
+				<-releaseSlow
+			}
+			return []herdrhub.Snapshot{{
+				EndpointID: endpoint.ID,
+				State:      herdrhub.StateOnline,
+				Sessions:   []herdrhub.Session{{SessionKey: herdrhub.SessionKey{EndpointID: endpoint.ID, SessionName: endpoint.ID + "-session"}, Running: true}},
+			}}
+		}, nil),
+	)
+	batchMsg := app.scheduleHubRefresh([]herdrhub.Endpoint{slow, fast})()
+	batch, ok := batchMsg.(tea.BatchMsg)
+	if !ok || len(batch) != 2 {
+		t.Fatalf("refresh command = %T", batchMsg)
+	}
+	results := make(chan tea.Msg, 2)
+	for _, cmd := range batch {
+		cmd := cmd
+		go func() { results <- cmd() }()
+	}
+	select {
+	case msg := <-results:
+		app.Update(msg)
+		found := false
+		for _, item := range app.listView.items {
+			if item.Herdr != nil && item.Herdr.Name == "fast-session" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("healthy endpoint was not applied first: %#v", app.listView.items)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("healthy endpoint waited for slow endpoint")
+	}
+	close(releaseSlow)
+	select {
+	case msg := <-results:
+		app.Update(msg)
+	case <-time.After(time.Second):
+		t.Fatal("slow endpoint did not finish after release")
+	}
+}
+
+func TestRemoteAgentStaleAndErrorDoNotCrossApply(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "local", Path: t.TempDir()})
+	endpoint := herdrhub.Endpoint{ID: "work", Label: "Work", Target: "work"}
+	app := NewApp(store, withoutHerdrSessions(), WithHerdrHubSnapshots([]herdrhub.Endpoint{herdrhub.LocalEndpoint(), endpoint}, []herdrhub.Snapshot{{EndpointID: "work", Sessions: []herdrhub.Session{{SessionKey: herdrhub.SessionKey{EndpointID: "work", SessionName: "run"}, Running: true}}}}))
+	for i, item := range app.listView.items {
+		if item.Herdr != nil && item.Endpoint != nil {
+			app.listView.cursor = i
+		}
+	}
+	app.herdrHubAgentGeneration = 2
+	app.Update(herdrHubAgentsResultMsg{EndpointID: "work", Session: "run", Generation: 1, Agents: []herdrhub.Agent{{Status: "wrong"}}})
+	if strings.Contains(app.listView.View(), "wrong") {
+		t.Fatal("stale result applied")
+	}
+	app.Update(herdrHubAgentsResultMsg{EndpointID: "work", Session: "run", Generation: 2, Err: errors.New("offline")})
+	if !strings.Contains(app.listView.View(), "agents unavailable") {
+		t.Fatal("error not rendered")
+	}
+}
+
+func TestRemoteAgentQueryIsCanceledWhenSelectionMoves(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "local", Path: t.TempDir()})
+	endpoint := herdrhub.Endpoint{ID: "work", Label: "Work", Target: "work"}
+	started := make(chan struct{})
+	app := NewApp(store,
+		WithHerdrSessionLister(func() ([]shell.HerdrSession, error) {
+			return []shell.HerdrSession{{Name: "local", Running: true}}, nil
+		}),
+		WithHerdrHubSnapshots([]herdrhub.Endpoint{herdrhub.LocalEndpoint(), endpoint}, []herdrhub.Snapshot{{EndpointID: "work", Sessions: []herdrhub.Session{{SessionKey: herdrhub.SessionKey{EndpointID: "work", SessionName: "run"}, Running: true}}}}),
+		WithHerdrHubAgentQuery(func(ctx context.Context, _ herdrhub.Endpoint, _ string) ([]herdrhub.Agent, error) {
+			close(started)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}),
+	)
+	for i, item := range app.listView.items {
+		if item.Herdr != nil && item.Endpoint != nil {
+			app.listView.cursor = i
+			break
+		}
+	}
+	cmd := app.scheduleSelectedHubAgents()
+	result := make(chan tea.Msg, 1)
+	go func() { result <- cmd() }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("remote agent query did not start")
+	}
+	for i, item := range app.listView.items {
+		if item.Herdr != nil && item.Endpoint == nil {
+			app.listView.cursor = i
+			break
+		}
+	}
+	app.scheduleSelectedHubAgents()
+	select {
+	case msg := <-result:
+		got := msg.(herdrHubAgentsResultMsg)
+		if !errors.Is(got.Err, context.Canceled) {
+			t.Fatalf("canceled query error = %v", got.Err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("remote agent query was not canceled")
+	}
+}
+
+func TestStoppedRemoteSessionRestoresThroughExactEndpoint(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "local", Path: t.TempDir()})
+	endpoint := herdrhub.Endpoint{ID: "work", Label: "Work", Target: "work"}
+	app := NewApp(store, withoutHerdrSessions(), WithHerdrHubSnapshots([]herdrhub.Endpoint{herdrhub.LocalEndpoint(), endpoint}, []herdrhub.Snapshot{{EndpointID: "work", Sessions: []herdrhub.Session{{SessionKey: herdrhub.SessionKey{EndpointID: "work", SessionName: "old"}, Running: false}}}}))
+	for i, item := range app.listView.items {
+		if item.Herdr != nil && item.Endpoint != nil {
+			app.listView.cursor = i
+		}
+	}
+	app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if app.result == nil || app.result.HerdrEndpointID != "work" || app.result.SessionName != "old" {
+		t.Fatalf("stopped remote result = %#v", app.result)
+	}
+}
+
+func TestHerdrHostAddEditAndConfirmedRemove(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "local", Path: t.TempDir()})
+	work := herdrhub.Endpoint{ID: "work", Label: "Work", Target: "work"}
+	var saved [][]herdrhub.Endpoint
+	var tested []herdrhub.Endpoint
+	app := NewApp(store,
+		withoutHerdrSessions(),
+		WithHerdrHubSnapshots([]herdrhub.Endpoint{herdrhub.LocalEndpoint(), work}, nil),
+		WithHerdrHubEndpointSaver(func(endpoints []herdrhub.Endpoint) error {
+			saved = append(saved, append([]herdrhub.Endpoint(nil), endpoints...))
+			return nil
+		}),
+		WithHerdrHubRefresh(func(_ context.Context, endpoints []herdrhub.Endpoint, _ herdrhub.Cache) []herdrhub.Snapshot {
+			tested = append(tested, endpoints...)
+			return nil
+		}, nil),
+	)
+
+	app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	if app.currentView != ViewHerdrHost {
+		t.Fatalf("add opened view %v", app.currentView)
+	}
+	app.herdrHostView.inputs[0].SetValue("gpu")
+	app.herdrHostView.inputs[1].SetValue("GPU Box")
+	app.herdrHostView.inputs[2].SetValue("gpu")
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if len(saved) != 1 || len(saved[0]) != 3 || saved[0][2].ID != "gpu" || cmd == nil {
+		t.Fatalf("add saved=%#v cmd=%v", saved, cmd)
+	}
+	cmd()
+	if len(tested) != 1 || tested[0].ID != "gpu" {
+		t.Fatalf("save did not test added host: %#v", tested)
+	}
+
+	for i, item := range app.listView.items {
+		if item.Type == "herdr_endpoint" && item.Endpoint != nil && item.Endpoint.ID == "gpu" {
+			app.listView.cursor = i
+		}
+	}
+	app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	app.herdrHostView.inputs[1].SetValue("GPU Edited")
+	app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if len(saved) != 2 || saved[1][2].Label != "GPU Edited" {
+		t.Fatalf("edit saved=%#v", saved)
+	}
+
+	for i, item := range app.listView.items {
+		if item.Type == "herdr_endpoint" && item.Endpoint != nil && item.Endpoint.ID == "gpu" {
+			app.listView.cursor = i
+		}
+	}
+	app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	if app.currentView != ViewHerdrHostDelete || len(saved) != 2 {
+		t.Fatalf("remove was not gated: view=%v saved=%#v", app.currentView, saved)
+	}
+	app.Update(tea.KeyMsg{Type: tea.KeyDown})
+	app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if len(saved) != 3 || len(saved[2]) != 2 || saved[2][1].ID != "work" {
+		t.Fatalf("confirmed remove saved=%#v", saved)
+	}
+}
+
+func TestHerdrHostRemoveDefaultsToCancel(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "local", Path: t.TempDir()})
+	work := herdrhub.Endpoint{ID: "work", Label: "Work", Target: "work"}
+	saves := 0
+	app := NewApp(store, withoutHerdrSessions(), WithHerdrHubSnapshots([]herdrhub.Endpoint{herdrhub.LocalEndpoint(), work}, nil), WithHerdrHubEndpointSaver(func([]herdrhub.Endpoint) error {
+		saves++
+		return nil
+	}))
+	for i, item := range app.listView.items {
+		if item.Type == "herdr_endpoint" && item.Endpoint != nil && item.Endpoint.ID == "work" {
+			app.listView.cursor = i
+		}
+	}
+	app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if saves != 0 || app.currentView != ViewList {
+		t.Fatalf("default remove selection was destructive: saves=%d view=%v", saves, app.currentView)
+	}
+}
 
 func TestNewTabModeShowsWorkspaceActions(t *testing.T) {
 	t.Setenv("ZELLIJ", "")

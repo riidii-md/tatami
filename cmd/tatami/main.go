@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/OleksandrBesan/tatami/internal/agent"
 	"github.com/OleksandrBesan/tatami/internal/config"
+	"github.com/OleksandrBesan/tatami/internal/herdrhub"
 	"github.com/OleksandrBesan/tatami/internal/shell"
 	"github.com/OleksandrBesan/tatami/internal/systemusage"
 	"github.com/OleksandrBesan/tatami/internal/tui"
@@ -211,6 +213,10 @@ func run(newTabMode, mobileMode bool) error {
 	if err != nil {
 		return fmt.Errorf("failed to initialize store: %w", err)
 	}
+	hubEndpoints, hubCache, hubCacheWritable, err := loadHerdrHub(paths)
+	if err != nil {
+		return err
+	}
 
 	// Prevent lipgloss from blocking on OSC 11 terminal background color query.
 	// Some terminals don't respond to OSC queries, causing a 5s hang on first render.
@@ -224,6 +230,20 @@ func run(newTabMode, mobileMode bool) error {
 	if mobileMode {
 		appOptions = append(appOptions, tui.WithMobileMode())
 	}
+	appOptions = append(appOptions, tui.WithHerdrHubSnapshots(hubEndpoints, hubCache.Snapshots))
+	var saveHubCache func(herdrhub.Cache) error
+	if hubCacheWritable {
+		saveHubCache = func(cache herdrhub.Cache) error { return herdrhub.SaveCache(paths.HerdrHubFile, cache) }
+	}
+	appOptions = append(appOptions, tui.WithHerdrHubRefresh(func(ctx context.Context, endpoints []herdrhub.Endpoint, previous herdrhub.Cache) []herdrhub.Snapshot {
+		return herdrhub.RefreshWithTimeout(ctx, herdrhub.NewClient(nil), endpoints, previous, 1, 5*time.Second)
+	}, saveHubCache))
+	appOptions = append(appOptions, tui.WithHerdrHubEndpointSaver(func(endpoints []herdrhub.Endpoint) error {
+		return herdrhub.NewStore(paths.HerdrHostsFile).Save(endpoints)
+	}))
+	appOptions = append(appOptions, tui.WithHerdrHubAgentQuery(func(ctx context.Context, endpoint herdrhub.Endpoint, session string) ([]herdrhub.Agent, error) {
+		return herdrhub.NewClient(nil).QueryAgents(ctx, endpoint, session)
+	}))
 	app := tui.NewApp(store, appOptions...)
 
 	// When running inside the shell wrapper (TATAMI_WRAPPER=1), stdout is redirected
@@ -257,6 +277,21 @@ func run(newTabMode, mobileMode bool) error {
 	}
 
 	return handleResult(result, newTabMode)
+}
+
+// loadHerdrHub treats host configuration as authoritative and the inventory as
+// disposable state. A corrupt cache is ignored for this run, but cache writes
+// are disabled so the original bytes remain available for diagnosis.
+func loadHerdrHub(paths *config.Paths) ([]herdrhub.Endpoint, herdrhub.Cache, bool, error) {
+	endpoints, err := herdrhub.NewStore(paths.HerdrHostsFile).List()
+	if err != nil {
+		return nil, herdrhub.Cache{}, false, fmt.Errorf("failed to load Herdr hosts configuration (not modified): %w", err)
+	}
+	cache, err := herdrhub.LoadCache(paths.HerdrHubFile)
+	if err != nil {
+		return endpoints, herdrhub.Cache{}, false, nil
+	}
+	return endpoints, cache, true, nil
 }
 
 func handleTopLevelCommand(args []string, paths *config.Paths, in io.Reader, out, errOut io.Writer) error {
@@ -623,7 +658,17 @@ func handleResult(result *tui.Result, newTabMode bool) error {
 		if result.SessionName == "" {
 			return fmt.Errorf("no Herdr session selected")
 		}
-		return shell.NewHerdrRunner().AttachSession(result.SessionName)
+		if result.HerdrEndpointID == "" || result.HerdrEndpointID == herdrhub.LocalEndpointID {
+			return shell.NewHerdrRunner().AttachSession(result.SessionName)
+		}
+		endpoint := herdrhub.Endpoint{ID: result.HerdrEndpointID, Label: result.HerdrEndpointID, Target: result.HerdrTarget}
+		if _, _, err := herdrhub.AttachArgs(endpoint, result.SessionName); err != nil {
+			return fmt.Errorf("invalid remote Herdr endpoint: %w", err)
+		}
+		if err := shell.NewHerdrRunner().AttachRemoteSession(endpoint.Target, result.SessionName); err != nil {
+			return fmt.Errorf("attach Herdr session %q on endpoint %q: %w", result.SessionName, endpoint.ID, err)
+		}
+		return nil
 	}
 
 	ws := result.Workspace

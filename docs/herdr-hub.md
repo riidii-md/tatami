@@ -1,0 +1,35 @@
+# Herdr Hub
+
+Tatami's Herdr Hub is a personal, federated session inventory. The local
+machine is always present. Add remote machines in `~/.config/tatami/herdr-hosts.json`:
+
+```json
+{"hosts":[{"id":"workbox","label":"Workbox","target":"workbox"}]}
+```
+
+`target` is one SSH-config alias, not a host command. Put host, user, port,
+identity, and authentication settings in `~/.ssh/config`; use `ssh-agent` when
+needed. Tatami performs background inventory with `ssh -o BatchMode=yes`, so a
+host requiring a password is shown as authentication-needed instead of
+prompting in the TUI. Interactive attachment is delegated to
+`herdr --remote <target> --session <name>`.
+
+The private inventory cache lives at `$XDG_STATE_HOME/tatami/herdr-hub.json`
+with mode `0600`. It contains only endpoint state and session inventory, never
+credentials, SSH keys, command arguments, pane contents, prompts, or terminal
+frames. Cached data may be shown as stale while a host is unreachable.
+
+Remote stop, delete, creation, workspace/layout creation, live previews,
+notifications, and metrics probes are deliberately deferred. Remote CPU and
+RAM are unavailable until Herdr defines a compatible read-only metrics
+capability.
+
+Tatami renders cached inventory first, then refreshes endpoints independently
+in the background. Use `r` to refresh the selected endpoint (or all endpoints
+when no endpoint is selected), and `R` to refresh all. `Space` collapses an
+endpoint; `a`, `e`, and `d` add, edit, and remove a selected remote host. Saving
+a host performs the same asynchronous non-interactive inventory test. Remote
+rows are attach-only: `Enter` selects the exact endpoint/session pair and does
+not expose local stop or delete actions. Entering a stopped named session lets
+Herdr use its normal restore path. For safe non-interactive SSH inventory,
+remote session names must use letters, numbers, `.`, `_`, or `-`.

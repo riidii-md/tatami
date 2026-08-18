@@ -124,6 +124,21 @@ func TestHerdrDeleteSessionUsesNamedSessionCommand(t *testing.T) {
 	}
 }
 
+func TestHerdrAttachRemoteSessionUsesExactArguments(t *testing.T) {
+	var got []string
+	runner := NewHerdrRunnerWithExecutor(func(args ...string) ([]byte, error) {
+		got = append([]string(nil), args...)
+		return nil, nil
+	})
+	if err := runner.AttachRemoteSession("workbox", "same-name"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--remote", "workbox", "--session", "same-name"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("arguments = %#v, want %#v", got, want)
+	}
+}
+
 func TestHerdrRunWithLayoutReusesRunningSession(t *testing.T) {
 	var started bool
 	var commands [][]string

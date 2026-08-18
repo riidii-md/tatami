@@ -1,5 +1,7 @@
 # Tatami
 
+See [Herdr Hub](docs/herdr-hub.md) for private SSH-backed Herdr endpoint setup.
+
 Terminal workspace manager with Zellij/Tmux integration. Quickly switch between projects with predefined layouts.
 
 ## Installation

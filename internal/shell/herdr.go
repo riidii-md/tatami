@@ -164,6 +164,19 @@ func (h *HerdrRunner) AttachSession(session string) error {
 	return err
 }
 
+// AttachRemoteSession delegates an interactive remote attachment to Herdr. The
+// target is intentionally an argv value, never a shell command fragment.
+func (h *HerdrRunner) AttachRemoteSession(target, session string) error {
+	if strings.TrimSpace(target) == "" {
+		return fmt.Errorf("remote Herdr target is required")
+	}
+	if strings.TrimSpace(session) == "" {
+		return fmt.Errorf("herdr session name is required")
+	}
+	_, err := h.exec("--remote", target, "--session", session)
+	return err
+}
+
 // StopSession stops a running named Herdr session.
 func (h *HerdrRunner) StopSession(session string) error {
 	if strings.TrimSpace(session) == "" {

@@ -3,7 +3,23 @@ package tui
 import (
 	"strings"
 	"testing"
+
+	"github.com/OleksandrBesan/tatami/internal/herdrhub"
+	"github.com/OleksandrBesan/tatami/internal/shell"
+	"github.com/OleksandrBesan/tatami/internal/workspace"
 )
+
+func TestMobileHubRendersEndpointAndRemoteSession(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "local", Path: t.TempDir()})
+	view := NewListViewWithHerdrSessions(store, func() ([]shell.HerdrSession, error) { return nil, nil })
+	view.SetHerdrHubSnapshots([]herdrhub.Endpoint{{ID: "work", Label: "Work", Target: "work"}}, []herdrhub.Snapshot{{EndpointID: "work", Sessions: []herdrhub.Session{{SessionKey: herdrhub.SessionKey{EndpointID: "work", SessionName: "same"}, Running: true}}}})
+	view.SetMobileMode(true)
+	view.SetSize(24, 20)
+	got := view.View()
+	if !strings.Contains(got, "Work") || !strings.Contains(got, "same") {
+		t.Fatalf("mobile hub=%s", got)
+	}
+}
 
 func TestNumberKeyIndexAcceptsOnlyVisibleOneThroughNineChoices(t *testing.T) {
 	tests := []struct {
