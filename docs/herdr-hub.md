@@ -7,12 +7,24 @@ machine is always present. Add remote machines in `~/.config/tatami/herdr-hosts.
 {"hosts":[{"id":"workbox","label":"Workbox","target":"workbox"}]}
 ```
 
-`target` is one SSH-config alias, not a host command. Put host, user, port,
-identity, and authentication settings in `~/.ssh/config`; use `ssh-agent` when
-needed. Tatami performs background inventory with `ssh -o BatchMode=yes`, so a
-host requiring a password is shown as authentication-needed instead of
-prompting in the TUI. Interactive attachment is delegated to
-`herdr --remote <target> --session <name>`.
+`target` can be an SSH-config alias, hostname, IP address, or a direct
+`user@host` destination such as `oles@bmo.local`. Herdr's
+`ssh://user@host:port` form is also supported. It is never treated as a host
+command. Direct destinations use normal OpenSSH keys and `ssh-agent`. For a
+specific key, define an alias in `~/.ssh/config`:
+
+```sshconfig
+Host macmini
+  HostName bmo.local
+  User oles
+  IdentityFile ~/.ssh/id_ed25519
+  IdentitiesOnly yes
+```
+
+Then use `macmini` as the Tatami destination. Tatami performs background
+inventory with `ssh -o BatchMode=yes`, so a host requiring a password is shown
+as authentication-needed instead of prompting in the TUI. Interactive
+attachment is delegated to `herdr --remote <target> --session <name>`.
 
 The private inventory cache lives at `$XDG_STATE_HOME/tatami/herdr-hub.json`
 with mode `0600`. It contains only endpoint state and session inventory, never

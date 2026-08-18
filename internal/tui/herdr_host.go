@@ -18,7 +18,7 @@ type HerdrHostView struct {
 
 func NewHerdrHostView(endpoint herdrhub.Endpoint) *HerdrHostView {
 	values := []string{endpoint.ID, endpoint.Label, endpoint.Target}
-	labels := []string{"id", "label", "SSH config alias"}
+	labels := []string{"id", "label", "SSH alias, user@host, or ssh://..."}
 	inputs := make([]textinput.Model, 3)
 	for i := range inputs {
 		inputs[i] = textinput.New()
@@ -56,6 +56,8 @@ func (v *HerdrHostView) View() string {
 		b.WriteString(errorStyle.Render(v.err.Error()))
 		b.WriteString("\n")
 	}
+	b.WriteString(mutedStyle.Render("Auth: OpenSSH config / ssh-agent.\nSpecific key: use an alias with IdentityFile."))
+	b.WriteString("\n\n")
 	b.WriteString(helpStyle.Render("[tab]next  [enter]save & test  [esc]cancel"))
 	return renderPanel(b.String(), v.mobileMode)
 }

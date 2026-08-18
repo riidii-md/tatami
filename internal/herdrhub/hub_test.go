@@ -63,7 +63,7 @@ func TestRefreshKeepsLastSuccessfulSnapshot(t *testing.T) {
 }
 func TestStoreRejectsUnsafeTargetAndKeepsCorruption(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "hosts.json")
-	for _, v := range []string{"-oProxyCommand=x", "a b", "user@host", "host\nnext", "host;touch", "host$HOME"} {
+	for _, v := range []string{"-oProxyCommand=x", "a b", "@host", "user@", "user@@host", "host\nnext", "host;touch", "host$HOME"} {
 		if err := ValidateEndpoint(Endpoint{ID: "x", Label: "X", Target: v}); err == nil {
 			t.Fatalf("accepted %q", v)
 		}
@@ -77,6 +77,36 @@ func TestStoreRejectsUnsafeTargetAndKeepsCorruption(t *testing.T) {
 	b, _ := os.ReadFile(p)
 	if string(b) != "{" {
 		t.Fatal("corrupt config changed")
+	}
+}
+
+func TestEndpointAcceptsSafeDirectSSHDestinations(t *testing.T) {
+	for _, target := range []string{
+		"macmini",
+		"100.108.232.8",
+		"bmo.local",
+		"oles@100.108.232.8",
+		"oles@bmo.local",
+		"ssh://oles@bmo.local:2222",
+		"ssh://oles@[fd00::1]:2222",
+	} {
+		if err := ValidateEndpoint(Endpoint{ID: "macmini", Label: "Mac Mini", Target: target}); err != nil {
+			t.Errorf("ValidateEndpoint target %q: %v", target, err)
+		}
+	}
+}
+
+func TestEndpointRejectsUnsafeSSHURIDestinations(t *testing.T) {
+	for _, target := range []string{
+		"http://oles@bmo.local",
+		"ssh://oles:secret@bmo.local",
+		"ssh://oles@bmo.local/path",
+		"ssh://oles@bmo.local:invalid",
+		"ssh://oles@bmo.local:70000",
+	} {
+		if err := ValidateEndpoint(Endpoint{ID: "macmini", Label: "Mac Mini", Target: target}); err == nil {
+			t.Errorf("ValidateEndpoint accepted unsafe target %q", target)
+		}
 	}
 }
 
@@ -96,17 +126,17 @@ func TestRejectsUnsafeRemoteInventoryFields(t *testing.T) {
 	}
 }
 func TestExactQueryAndAttachArgs(t *testing.T) {
-	remote := Endpoint{ID: "work", Label: "Work", Target: "work"}
+	remote := Endpoint{ID: "work", Label: "Work", Target: "oles@bmo.local"}
 	n, a, err := QueryArgs(remote)
-	if err != nil || n != "ssh" || !reflect.DeepEqual(a, []string{"-o", "BatchMode=yes", "--", "work", "herdr", "session", "list", "--json"}) {
+	if err != nil || n != "ssh" || !reflect.DeepEqual(a, []string{"-o", "BatchMode=yes", "--", "oles@bmo.local", "herdr", "session", "list", "--json"}) {
 		t.Fatalf("query %s %#v %v", n, a, err)
 	}
 	n, a, err = AttachArgs(remote, "same")
-	if err != nil || n != "herdr" || !reflect.DeepEqual(a, []string{"--remote", "work", "--session", "same"}) {
+	if err != nil || n != "herdr" || !reflect.DeepEqual(a, []string{"--remote", "oles@bmo.local", "--session", "same"}) {
 		t.Fatalf("attach %s %#v %v", n, a, err)
 	}
 	n, a, err = AgentArgs(remote, "same")
-	if err != nil || n != "ssh" || !reflect.DeepEqual(a, []string{"-o", "BatchMode=yes", "--", "work", "herdr", "--session", "same", "agent", "list"}) {
+	if err != nil || n != "ssh" || !reflect.DeepEqual(a, []string{"-o", "BatchMode=yes", "--", "oles@bmo.local", "herdr", "--session", "same", "agent", "list"}) {
 		t.Fatalf("agents %s %#v %v", n, a, err)
 	}
 }

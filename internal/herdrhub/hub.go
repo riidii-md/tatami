@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -91,24 +94,85 @@ func ValidateEndpoint(e Endpoint) error {
 	}
 	t := strings.TrimSpace(e.Target)
 	if t == "" {
-		return errors.New("SSH target is required")
+		return errors.New("SSH destination is required")
 	}
-	if len(t) > 253 || !asciiAlphaNumeric(rune(t[0])) || !asciiAlphaNumeric(rune(t[len(t)-1])) {
-		return errors.New("SSH target must start and end with a letter or number")
-	}
-	for _, r := range t {
-		if !asciiAlphaNumeric(r) && r != '-' && r != '_' && r != '.' {
-			return errors.New("SSH target must be a safe SSH config alias")
-		}
-	}
-	if strings.ContainsAny(t, "@:/") {
-		return errors.New("SSH target must be an SSH config alias, without credentials, keys, or options")
+	if err := validateSSHDestination(t); err != nil {
+		return err
 	}
 	return nil
 }
 
 func asciiAlphaNumeric(r rune) bool {
 	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9'
+}
+
+func validateSSHDestination(destination string) error {
+	if strings.HasPrefix(destination, "ssh://") {
+		return validateSSHURI(destination)
+	}
+	if len(destination) > 320 || strings.HasPrefix(destination, "-") || strings.Count(destination, "@") > 1 {
+		return invalidSSHDestination()
+	}
+	user, host, hasUser := strings.Cut(destination, "@")
+	if !hasUser {
+		host = user
+		user = ""
+	}
+	if hasUser && !safeSSHNamePart(user, 64, false) {
+		return invalidSSHDestination()
+	}
+	if !safeSSHNamePart(host, 253, true) {
+		return invalidSSHDestination()
+	}
+	return nil
+}
+
+func validateSSHURI(destination string) error {
+	if len(destination) > 384 {
+		return invalidSSHDestination()
+	}
+	parsed, err := url.Parse(destination)
+	if err != nil || parsed.Scheme != "ssh" || parsed.Opaque != "" || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return invalidSSHDestination()
+	}
+	if parsed.User != nil {
+		if _, hasPassword := parsed.User.Password(); hasPassword || !safeSSHNamePart(parsed.User.Username(), 64, false) {
+			return invalidSSHDestination()
+		}
+	}
+	host := parsed.Hostname()
+	if net.ParseIP(host) == nil && !safeSSHNamePart(host, 253, true) {
+		return invalidSSHDestination()
+	}
+	if strings.HasSuffix(parsed.Host, ":") {
+		return invalidSSHDestination()
+	}
+	if port := parsed.Port(); port != "" {
+		value, err := strconv.Atoi(port)
+		if err != nil || value < 1 || value > 65535 {
+			return invalidSSHDestination()
+		}
+	}
+	return nil
+}
+
+func invalidSSHDestination() error {
+	return errors.New("SSH destination must be a safe alias, host, IP, user@host, or ssh://user@host:port")
+}
+
+func safeSSHNamePart(value string, max int, requireAlphaNumericEdges bool) bool {
+	if value == "" || len(value) > max {
+		return false
+	}
+	if requireAlphaNumericEdges && (!asciiAlphaNumeric(rune(value[0])) || !asciiAlphaNumeric(rune(value[len(value)-1]))) {
+		return false
+	}
+	for _, r := range value {
+		if !asciiAlphaNumeric(r) && r != '-' && r != '_' && r != '.' {
+			return false
+		}
+	}
+	return true
 }
 
 func validateRemoteSessionName(name string) error {
