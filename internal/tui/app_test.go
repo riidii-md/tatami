@@ -151,14 +151,14 @@ func TestRemoteRefreshKeysUseSelectedAndAllEndpointsAndCancel(t *testing.T) {
 	}
 }
 
-func TestEnterDiscoversAndChoosesRemoteSessionAfterInteractiveAuthentication(t *testing.T) {
+func TestEnterDiscoversRemoteTatamiAndKeepsUserOnMainScreen(t *testing.T) {
 	store := newTestStore(t, &workspace.Workspace{Name: "local", Path: t.TempDir()})
 	remote := herdrhub.Endpoint{ID: "work", Label: "Work", Target: "work"}
 	app := NewApp(store,
 		withoutHerdrSessions(),
 		WithHerdrHubSnapshots([]herdrhub.Endpoint{herdrhub.LocalEndpoint(), remote}, []herdrhub.Snapshot{{EndpointID: remote.ID, State: herdrhub.StateAuthenticationNeeded}}),
-		WithHerdrHubInteractiveSessionLister(func(context.Context, herdrhub.Endpoint, io.Reader, io.Writer) ([]herdrhub.Session, error) {
-			return nil, nil
+		WithHerdrHubInteractiveInventory(func(context.Context, herdrhub.Endpoint, io.Reader, io.Writer) (herdrhub.Snapshot, error) {
+			return herdrhub.Snapshot{}, nil
 		}),
 	)
 	for i, item := range app.listView.items {
@@ -178,19 +178,29 @@ func TestEnterDiscoversAndChoosesRemoteSessionAfterInteractiveAuthentication(t *
 		t.Fatal("opening remote endpoint did not schedule interactive discovery")
 	}
 
-	app.Update(herdrHubInteractiveSessionsMsg{Endpoint: remote, Sessions: []herdrhub.Session{
-		{SessionKey: herdrhub.SessionKey{EndpointID: remote.ID, SessionName: "default"}, Running: true, Default: true},
-		{SessionKey: herdrhub.SessionKey{EndpointID: remote.ID, SessionName: "agents"}, Running: true},
+	app.Update(herdrHubInteractiveInventoryMsg{Endpoint: remote, Snapshot: herdrhub.Snapshot{
+		EndpointID: remote.ID,
+		State:      herdrhub.StateOnline,
+		Host:       "work-host",
+		Workspaces: []herdrhub.WorkspaceSummary{{Name: "API", Path: "/srv/api", Folder: "team", QuickAccess: true}},
+		Sessions:   []herdrhub.Session{{SessionKey: herdrhub.SessionKey{EndpointID: remote.ID, SessionName: "agents"}, Running: true}},
+		Hosts:      []herdrhub.Endpoint{{ID: "macmini", Label: "Mac Mini", Target: "macmini"}},
 	}})
-	if app.currentView != ViewHerdrSessionPicker {
+	if app.currentView != ViewList {
 		t.Fatalf("view=%v", app.currentView)
 	}
-	if got := app.herdrSessionPickerView.View(); !strings.Contains(got, "default") || !strings.Contains(got, "agents") {
-		t.Fatalf("remote picker missing sessions: %s", got)
+	app.listView.SetSize(120, 60)
+	if got := app.listView.View(); !strings.Contains(got, "Quick Access") || !strings.Contains(got, "API") || !strings.Contains(got, "agents") || !strings.Contains(got, "Mac Mini") {
+		t.Fatalf("federated main screen missing remote inventory: %s", got)
 	}
-	app.Update(tea.KeyMsg{Type: tea.KeyDown})
+	for i, item := range app.listView.items {
+		if item.Herdr != nil && item.Endpoint != nil && item.Endpoint.Key() == remote.Key() {
+			app.listView.cursor = i
+			break
+		}
+	}
 	_, cmd = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if app.result == nil || app.result.Action != ActionAttachHerdrSession || app.result.HerdrEndpointID != remote.ID || app.result.HerdrTarget != remote.Target || app.result.SessionName != "agents" {
+	if app.result == nil || app.result.Action != ActionAttachHerdrSession || app.result.HerdrEndpointID != remote.ID || app.result.HerdrTarget != remote.Target || app.result.SessionName != "agents" || len(app.result.HerdrVia) != 0 {
 		t.Fatalf("remote session result = %#v", app.result)
 	}
 	if cmd == nil {
@@ -198,19 +208,19 @@ func TestEnterDiscoversAndChoosesRemoteSessionAfterInteractiveAuthentication(t *
 	}
 }
 
-func TestInteractiveRemoteSessionCommandPassesTerminalIO(t *testing.T) {
+func TestInteractiveRemoteInventoryCommandPassesTerminalIO(t *testing.T) {
 	remote := herdrhub.Endpoint{ID: "work", Label: "Work", Target: "work"}
 	stdin := strings.NewReader("terminal input")
 	stderr := io.Discard
 	called := false
-	command := &herdrHubInteractiveListCommand{
+	command := &herdrHubInteractiveInventoryCommand{
 		endpoint: remote,
-		lister: func(_ context.Context, got herdrhub.Endpoint, gotStdin io.Reader, gotStderr io.Writer) ([]herdrhub.Session, error) {
+		query: func(_ context.Context, got herdrhub.Endpoint, gotStdin io.Reader, gotStderr io.Writer) (herdrhub.Snapshot, error) {
 			called = true
-			if got != remote || gotStdin != stdin || gotStderr != stderr {
+			if !reflect.DeepEqual(got, remote) || gotStdin != stdin || gotStderr != stderr {
 				t.Fatalf("interactive call endpoint=%#v stdin=%v stderr=%v", got, gotStdin == stdin, gotStderr == stderr)
 			}
-			return []herdrhub.Session{{SessionKey: herdrhub.SessionKey{EndpointID: remote.ID, SessionName: "agents"}}}, nil
+			return herdrhub.Snapshot{EndpointID: remote.ID, State: herdrhub.StateOnline, Sessions: []herdrhub.Session{{SessionKey: herdrhub.SessionKey{EndpointID: remote.ID, SessionName: "agents"}}}}, nil
 		},
 	}
 	command.SetStdin(stdin)
@@ -219,12 +229,12 @@ func TestInteractiveRemoteSessionCommandPassesTerminalIO(t *testing.T) {
 	if err := command.Run(); err != nil {
 		t.Fatal(err)
 	}
-	if !called || len(command.sessions) != 1 || command.sessions[0].SessionName != "agents" {
-		t.Fatalf("interactive command result = %#v", command.sessions)
+	if !called || len(command.snapshot.Sessions) != 1 || command.snapshot.Sessions[0].SessionName != "agents" {
+		t.Fatalf("interactive command result = %#v", command.snapshot)
 	}
 }
 
-func TestEnterOnlineRemoteEndpointUsesCachedSessionPicker(t *testing.T) {
+func TestEnterOnlineRemoteEndpointStaysExpandedOnMainScreen(t *testing.T) {
 	store := newTestStore(t, &workspace.Workspace{Name: "local", Path: t.TempDir()})
 	remote := herdrhub.Endpoint{ID: "work", Label: "Work", Target: "work"}
 	app := NewApp(store,
@@ -242,12 +252,8 @@ func TestEnterOnlineRemoteEndpointUsesCachedSessionPicker(t *testing.T) {
 	}
 
 	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if cmd != nil || app.currentView != ViewHerdrSessionPicker || app.herdrSessionPickerView.Selected() != "named" {
-		t.Fatalf("cached remote picker: cmd=%v view=%v selected=%q", cmd, app.currentView, app.herdrSessionPickerView.Selected())
-	}
-	app.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	if app.currentView != ViewList {
-		t.Fatalf("remote picker escape returned to %v; want list", app.currentView)
+	if cmd != nil || app.currentView != ViewList || app.listView.hubCollapsed[remote.Key()] {
+		t.Fatalf("online endpoint: cmd=%v view=%v collapsed=%v", cmd, app.currentView, app.listView.hubCollapsed[remote.Key()])
 	}
 }
 

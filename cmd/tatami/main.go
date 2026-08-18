@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -26,6 +27,14 @@ import (
 
 var version = "dev"
 var collectHerdrResources = systemusage.CollectHerdr
+var listHerdrSessionsForInventory = shell.ListHerdrSessions
+var runInteractiveCommand = func(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
 
 type launchOptions struct {
 	newTabMode  bool
@@ -53,6 +62,13 @@ func main() {
 }
 
 func runCLI(args []string, out, errOut io.Writer) int {
+	if len(args) > 0 && args[0] == "hub" {
+		if err := handleHubCommand(args[1:], out); err != nil {
+			fmt.Fprintf(errOut, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+	}
 	if len(args) > 0 && args[0] == "resources" {
 		if err := handleResourcesCommand(args[1:], out); err != nil {
 			fmt.Fprintf(errOut, "Error: %v\n", err)
@@ -87,6 +103,42 @@ func runCLI(args []string, out, errOut io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func handleHubCommand(args []string, out io.Writer) error {
+	if len(args) != 2 || args[0] != "inventory" || args[1] != "--json" {
+		return errors.New("usage: tatami hub inventory --json")
+	}
+	paths, err := config.GetPaths()
+	if err != nil {
+		return fmt.Errorf("get Tatami paths: %w", err)
+	}
+	workspaceStore, err := workspace.NewStore(paths)
+	if err != nil {
+		return fmt.Errorf("load Tatami workspaces: %w", err)
+	}
+	endpoints, err := herdrhub.NewStore(paths.HerdrHostsFile).List()
+	if err != nil {
+		return fmt.Errorf("load Tatami hosts: %w", err)
+	}
+	sessions, err := listHerdrSessionsForInventory()
+	if err != nil {
+		// Tatami workspaces and downstream hosts remain useful even when Herdr
+		// is not installed or its local daemon is temporarily unavailable.
+		sessions = nil
+	}
+	host, err := os.Hostname()
+	if err != nil {
+		return fmt.Errorf("read hostname: %w", err)
+	}
+	inventory, err := herdrhub.BuildInventory(host, workspaceStore.List(), sessions, endpoints)
+	if err != nil {
+		return fmt.Errorf("build Tatami inventory: %w", err)
+	}
+	if err := json.NewEncoder(out).Encode(inventory); err != nil {
+		return fmt.Errorf("write Tatami inventory: %w", err)
+	}
+	return nil
 }
 
 func handleResourcesCommand(args []string, out io.Writer) error {
@@ -245,8 +297,8 @@ func run(newTabMode, mobileMode bool) error {
 	appOptions = append(appOptions, tui.WithHerdrHubAgentQuery(func(ctx context.Context, endpoint herdrhub.Endpoint, session string) ([]herdrhub.Agent, error) {
 		return herdrHubClient.QueryAgents(ctx, endpoint, session)
 	}))
-	appOptions = append(appOptions, tui.WithHerdrHubInteractiveSessionLister(func(ctx context.Context, endpoint herdrhub.Endpoint, stdin io.Reader, stderr io.Writer) ([]herdrhub.Session, error) {
-		return herdrHubClient.QueryInteractive(ctx, endpoint, stdin, stderr)
+	appOptions = append(appOptions, tui.WithHerdrHubInteractiveInventory(func(ctx context.Context, endpoint herdrhub.Endpoint, stdin io.Reader, stderr io.Writer) (herdrhub.Snapshot, error) {
+		return herdrHubClient.QueryInventoryInteractive(ctx, endpoint, stdin, stderr)
 	}))
 	app := tui.NewApp(store, appOptions...)
 
@@ -540,6 +592,9 @@ func newTabProcess(ws *workspace.Workspace, shellPath string, lookPath func(stri
 		if ws.Remote.Key != "" {
 			args = append(args, "-i", ws.Remote.Key)
 		}
+		if len(ws.Remote.Jump) > 0 {
+			args = append(args, "-J", strings.Join(ws.Remote.Jump, ","))
+		}
 		args = append(args, "-t", "--", ws.Remote.Host, remoteCommand)
 		return processSpec{path: sshPath, args: args}, nil
 	}
@@ -675,11 +730,22 @@ func handleResult(result *tui.Result, newTabMode bool) error {
 		if result.HerdrEndpointID == "" || result.HerdrEndpointID == herdrhub.LocalEndpointID {
 			return shell.NewHerdrRunner().AttachSession(result.SessionName)
 		}
-		endpoint := herdrhub.Endpoint{ID: result.HerdrEndpointID, Label: result.HerdrEndpointID, Target: result.HerdrTarget}
-		if _, _, err := herdrhub.AttachArgs(endpoint, result.SessionName); err != nil {
+		endpointID := result.HerdrEndpointID
+		if slash := strings.LastIndex(endpointID, "/"); slash >= 0 {
+			endpointID = endpointID[slash+1:]
+		}
+		endpoint := herdrhub.Endpoint{
+			ID:     endpointID,
+			NodeID: result.HerdrEndpointID,
+			Label:  endpointID,
+			Target: result.HerdrTarget,
+			Via:    append([]string(nil), result.HerdrVia...),
+		}
+		name, args, err := herdrhub.AttachArgs(endpoint, result.SessionName)
+		if err != nil {
 			return fmt.Errorf("invalid remote Herdr endpoint: %w", err)
 		}
-		if err := shell.NewHerdrRunner().AttachRemoteSession(endpoint.Target, result.SessionName); err != nil {
+		if err := runInteractiveCommand(name, args...); err != nil {
 			return fmt.Errorf("attach Herdr session %q on endpoint %q: %w", result.SessionName, endpoint.ID, err)
 		}
 		return nil
@@ -716,13 +782,7 @@ func handleResult(result *tui.Result, newTabMode bool) error {
 	switch result.Action {
 	case tui.ActionCD:
 		if isRemote {
-			// For remote, SSH to the host
-			var sshCmd string
-			if ws.Remote.Key != "" {
-				sshCmd = fmt.Sprintf("ssh -i %s %s -t 'cd %s && exec $SHELL'", ws.Remote.Key, ws.Remote.Host, ws.Remote.Path)
-			} else {
-				sshCmd = fmt.Sprintf("ssh %s -t 'cd %s && exec $SHELL'", ws.Remote.Host, ws.Remote.Path)
-			}
+			sshCmd := shell.BuildRemoteSSHCommand(ws.Remote, "")
 			if zellij.IsInsideSession() {
 				return zellij.WriteChars(sshCmd + "\n")
 			}
@@ -759,10 +819,10 @@ func handleResult(result *tui.Result, newTabMode bool) error {
 	case tui.ActionNewTab:
 		if isRemote {
 			if zellij.IsInsideSession() {
-				return zellij.NewTabSSH(ws.Remote.Host, ws.Remote.Key, ws.Remote.Path, ws.Name)
+				return zellij.NewTabSSHRemote(ws.Remote, ws.Name)
 			}
 			if tmux.IsInsideSession() {
-				return tmux.NewWindowSSH(ws.Remote.Host, ws.Remote.Key, ws.Remote.Path, ws.Name)
+				return tmux.NewWindowSSHRemote(ws.Remote, ws.Name)
 			}
 		} else {
 			if zellij.IsInsideSession() {
@@ -778,10 +838,10 @@ func handleResult(result *tui.Result, newTabMode bool) error {
 	case tui.ActionNewPane:
 		if isRemote {
 			if zellij.IsInsideSession() {
-				return zellij.NewPaneSSH(ws.Remote.Host, ws.Remote.Key, ws.Remote.Path, "down")
+				return zellij.NewPaneSSHRemote(ws.Remote, "down")
 			}
 			if tmux.IsInsideSession() {
-				return tmux.NewPaneSSH(ws.Remote.Host, ws.Remote.Key, ws.Remote.Path, "down")
+				return tmux.NewPaneSSHRemote(ws.Remote, "down")
 			}
 		} else {
 			if zellij.IsInsideSession() {

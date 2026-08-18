@@ -20,7 +20,7 @@ func TestListViewShowsCachedRemoteSessionsWithEndpointIdentity(t *testing.T) {
 	view := NewListViewWithHerdrSessions(store, func() ([]shell.HerdrSession, error) { return nil, nil })
 	view.SetHerdrHubSnapshots([]herdrhub.Endpoint{{ID: "work", Label: "Workbox", Target: "work"}}, []herdrhub.Snapshot{{EndpointID: "work", Sessions: []herdrhub.Session{{SessionKey: herdrhub.SessionKey{EndpointID: "work", SessionName: "same"}, Running: true}}}})
 	view.SetSize(100, 40)
-	if !strings.Contains(view.View(), "Herdr · Workbox") || !strings.Contains(view.View(), "same") {
+	if !strings.Contains(view.View(), "Tatami · Workbox") || !strings.Contains(view.View(), "same") {
 		t.Fatalf("hub not rendered: %s", view.View())
 	}
 	view.filtering = true
@@ -28,6 +28,54 @@ func TestListViewShowsCachedRemoteSessionsWithEndpointIdentity(t *testing.T) {
 	view.refreshItems()
 	if got := view.Selected(); got == nil || got.Endpoint == nil || got.Endpoint.ID != "work" {
 		t.Fatalf("filtered selection = %#v", got)
+	}
+}
+
+func TestListViewRendersFullRemoteTatamiTreeAndDescendantRoute(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "local", Path: t.TempDir()})
+	view := NewListViewWithHerdrSessions(store, func() ([]shell.HerdrSession, error) { return nil, nil })
+	bastion := herdrhub.Endpoint{ID: "bastion", Label: "Bastion", Target: "bastion"}
+	view.SetHerdrHubSnapshots([]herdrhub.Endpoint{bastion}, []herdrhub.Snapshot{{
+		EndpointID: bastion.ID,
+		State:      herdrhub.StateOnline,
+		Workspaces: []herdrhub.WorkspaceSummary{
+			{Name: "API", Path: "/srv/api", Folder: "team", QuickAccess: true},
+			{Name: "Docs", Path: "/srv/docs", Folder: "team"},
+			{Name: "Database", Path: "/srv/db", Target: "database", Jump: []string{"relay"}},
+		},
+		Sessions: []herdrhub.Session{{SessionKey: herdrhub.SessionKey{EndpointID: bastion.ID, SessionName: "agents"}, Running: true}},
+		Hosts:    []herdrhub.Endpoint{{ID: "macmini", Label: "Mac Mini", Target: "macmini"}},
+	}})
+	view.SetSize(120, 60)
+	got := view.View()
+	for _, want := range []string{"Bastion", "Quick Access", "API", "Tatami Projects", "team/Docs", "Herdr Sessions", "agents", "Remote Hosts", "Mac Mini"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("remote tree missing %q:\n%s", want, got)
+		}
+	}
+	var child *herdrhub.Endpoint
+	var remoteWorkspace *workspace.Workspace
+	var nestedWorkspace *workspace.Workspace
+	for _, item := range view.items {
+		if item.Type == "herdr_endpoint" && item.Endpoint != nil && item.Endpoint.ID == "macmini" {
+			copy := *item.Endpoint
+			child = &copy
+		}
+		if item.Type == "workspace" && item.Workspace != nil && item.Workspace.Name == "Docs" && item.Endpoint != nil {
+			remoteWorkspace = item.Workspace
+		}
+		if item.Type == "workspace" && item.Workspace != nil && item.Workspace.Name == "Database" && item.Endpoint != nil {
+			nestedWorkspace = item.Workspace
+		}
+	}
+	if child == nil || child.Key() != "bastion/macmini" || !reflect.DeepEqual(child.Via, []string{"bastion"}) {
+		t.Fatalf("child endpoint = %#v", child)
+	}
+	if remoteWorkspace == nil || remoteWorkspace.Remote == nil || remoteWorkspace.Remote.Host != "bastion" || len(remoteWorkspace.Remote.Jump) != 0 || remoteWorkspace.Remote.Path != "/srv/docs" {
+		t.Fatalf("remote workspace = %#v", remoteWorkspace)
+	}
+	if nestedWorkspace == nil || nestedWorkspace.Remote == nil || nestedWorkspace.Remote.Host != "database" || !reflect.DeepEqual(nestedWorkspace.Remote.Jump, []string{"bastion", "relay"}) {
+		t.Fatalf("nested remote workspace = %#v", nestedWorkspace)
 	}
 }
 
@@ -74,6 +122,19 @@ func TestHubAuthenticationGuidanceDoesNotEchoUnsafeTarget(t *testing.T) {
 	got := hubAuthenticationGuidance(endpoint, herdrhub.Snapshot{State: herdrhub.StateAuthenticationNeeded})
 	if strings.Contains(got, endpoint.Target) || strings.Contains(got, "ssh-copy-id") {
 		t.Fatalf("unsafe target exposed in authentication command: %q", got)
+	}
+}
+
+func TestHubAuthenticationGuidanceIncludesJumpRoute(t *testing.T) {
+	endpoint := &herdrhub.Endpoint{ID: "macmini", NodeID: "bastion/macmini", Label: "Mac Mini", Target: "macmini", Via: []string{"user@bastion", "relay"}}
+	got := hubAuthenticationGuidance(endpoint, herdrhub.Snapshot{State: herdrhub.StateAuthenticationNeeded})
+	for _, want := range []string{
+		"ssh-copy-id -o ProxyJump=user@bastion,relay macmini",
+		"ssh -o BatchMode=yes -J user@bastion,relay macmini true",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("route guidance missing %q:\n%s", want, got)
+		}
 	}
 }
 

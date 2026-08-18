@@ -45,6 +45,7 @@ type ListView struct {
 	hubEndpoints     map[string]herdrhub.Endpoint
 	hubEndpointOrder []herdrhub.Endpoint
 	hubCollapsed     map[string]bool
+	hubCollapseKnown map[string]bool
 	hubAgents        map[string][]herdrhub.Agent
 	hubAgentErr      map[string]error
 	hubAgentLoading  map[string]bool
@@ -84,7 +85,7 @@ func (l *ListView) SetHerdrHubSnapshots(endpoints []herdrhub.Endpoint, snapshots
 	if selected := l.Selected(); selected != nil && selected.Herdr != nil {
 		selectedSession = selected.Herdr.Name
 		if selected.Endpoint != nil {
-			selectedEndpoint = selected.Endpoint.ID
+			selectedEndpoint = selected.Endpoint.Key()
 		}
 	}
 	l.hubEndpoints = make(map[string]herdrhub.Endpoint, len(endpoints))
@@ -95,6 +96,16 @@ func (l *ListView) SetHerdrHubSnapshots(endpoints []herdrhub.Endpoint, snapshots
 	if l.hubCollapsed == nil {
 		l.hubCollapsed = make(map[string]bool)
 	}
+	if l.hubCollapseKnown == nil {
+		l.hubCollapseKnown = make(map[string]bool)
+	}
+	for _, endpoint := range endpoints {
+		key := endpoint.Key()
+		if !l.hubCollapseKnown[key] {
+			l.hubCollapseKnown[key] = true
+			l.hubCollapsed[key] = false
+		}
+	}
 	l.hubSnapshots = append([]herdrhub.Snapshot(nil), snapshots...)
 	l.refreshItems()
 	if selectedSession != "" {
@@ -102,7 +113,7 @@ func (l *ListView) SetHerdrHubSnapshots(endpoints []herdrhub.Endpoint, snapshots
 			if item.Herdr != nil && item.Herdr.Name == selectedSession {
 				endpoint := herdrhub.LocalEndpointID
 				if item.Endpoint != nil {
-					endpoint = item.Endpoint.ID
+					endpoint = item.Endpoint.Key()
 				}
 				if endpoint == selectedEndpoint {
 					l.cursor = i
@@ -255,38 +266,123 @@ func (l *ListView) appendHubItems(query string, flat bool) {
 		if endpoint.ID == herdrhub.LocalEndpointID {
 			continue
 		}
-		snapshot, ok := snapshots[endpoint.ID]
-		if !ok {
-			snapshot = herdrhub.Snapshot{EndpointID: endpoint.ID, State: herdrhub.StateLoading}
+		l.appendHubEndpoint(endpoint, 0, query, flat, snapshots)
+	}
+}
+
+func (l *ListView) appendHubEndpoint(endpoint herdrhub.Endpoint, depth int, query string, flat bool, snapshots map[string]herdrhub.Snapshot) {
+	key := endpoint.Key()
+	snapshot, ok := snapshots[key]
+	if !ok {
+		snapshot = herdrhub.Snapshot{EndpointID: key, State: herdrhub.StateLoading}
+	}
+	indent := strings.Repeat("  ", depth)
+	if !flat {
+		if !l.hubCollapseKnown[key] {
+			l.hubCollapseKnown[key] = true
+			l.hubCollapsed[key] = depth > 0
 		}
-		if !flat {
-			prefix := "▾ "
-			if l.hubCollapsed[endpoint.ID] {
-				prefix = "▸ "
-			}
-			endpointCopy := endpoint
-			l.items = append(l.items, ListItem{Type: "herdr_endpoint", Name: prefix + "Herdr · " + endpoint.Label + " · " + hubEndpointStatus(snapshot), Endpoint: &endpointCopy})
-			if l.hubCollapsed[endpoint.ID] {
-				continue
-			}
+		prefix := "▾ "
+		if l.hubCollapsed[key] {
+			prefix = "▸ "
 		}
-		for _, session := range snapshot.Sessions {
-			agentText := ""
-			for _, agent := range l.hubAgents[hubSessionKey(endpoint.ID, session.SessionName)] {
-				agentText += " " + agent.Kind + " " + agent.Status + " " + agent.CWD
-			}
-			if query != "" && !strings.Contains(strings.ToLower(endpoint.Label+" "+endpoint.ID+" "+session.SessionName+agentText), query) {
-				continue
-			}
-			copy := shell.HerdrSession{Name: session.SessionName, Running: session.Running, Default: session.Default}
-			endpointCopy := endpoint
-			name := session.SessionName
-			if flat {
-				name += " · " + endpoint.Label
-			}
-			l.items = append(l.items, ListItem{Type: "herdr_session", Name: name, Herdr: &copy, Endpoint: &endpointCopy})
+		endpointCopy := endpoint
+		l.items = append(l.items, ListItem{Type: "herdr_endpoint", Name: indent + prefix + "Tatami · " + endpoint.Label + " · " + hubEndpointStatus(snapshot), Endpoint: &endpointCopy})
+		if l.hubCollapsed[key] {
+			return
 		}
 	}
+	sectionIndent := strings.Repeat("  ", depth+1)
+	quick := make([]herdrhub.WorkspaceSummary, 0)
+	for _, summary := range snapshot.Workspaces {
+		if summary.QuickAccess {
+			quick = append(quick, summary)
+		}
+	}
+	if !flat && len(quick) > 0 {
+		l.items = append(l.items, ListItem{Type: "remote_header", Name: sectionIndent + "Quick Access"})
+	}
+	for _, summary := range quick {
+		l.appendRemoteWorkspace(endpoint, summary, depth+2, query, flat)
+	}
+	if !flat && len(snapshot.Workspaces) > 0 {
+		l.items = append(l.items, ListItem{Type: "remote_header", Name: sectionIndent + "Tatami Projects"})
+	}
+	for _, summary := range snapshot.Workspaces {
+		l.appendRemoteWorkspace(endpoint, summary, depth+2, query, flat)
+	}
+	if !flat && len(snapshot.Sessions) > 0 {
+		l.items = append(l.items, ListItem{Type: "remote_header", Name: sectionIndent + "Herdr Sessions"})
+	}
+	for _, session := range snapshot.Sessions {
+		agentText := ""
+		for _, agent := range l.hubAgents[hubSessionKey(key, session.SessionName)] {
+			agentText += " " + agent.Kind + " " + agent.Status + " " + agent.CWD
+		}
+		if query != "" && !strings.Contains(strings.ToLower(endpoint.Label+" "+key+" "+session.SessionName+agentText), query) {
+			continue
+		}
+		copy := shell.HerdrSession{Name: session.SessionName, Running: session.Running, Default: session.Default}
+		endpointCopy := endpoint
+		name := strings.Repeat("  ", depth+2) + session.SessionName
+		if flat {
+			name = session.SessionName + " · " + endpoint.Label
+		}
+		l.items = append(l.items, ListItem{Type: "herdr_session", Name: name, Herdr: &copy, Endpoint: &endpointCopy})
+	}
+	if !flat && len(snapshot.Hosts) > 0 {
+		l.items = append(l.items, ListItem{Type: "remote_header", Name: sectionIndent + "Remote Hosts"})
+	}
+	for _, savedChild := range snapshot.Hosts {
+		child, err := herdrhub.DescendantEndpoint(endpoint, savedChild)
+		if err != nil {
+			continue
+		}
+		l.appendHubEndpoint(child, depth+1, query, flat, snapshots)
+	}
+}
+
+func (l *ListView) appendRemoteWorkspace(endpoint herdrhub.Endpoint, summary herdrhub.WorkspaceSummary, depth int, query string, flat bool) {
+	displayName := summary.Name
+	if summary.Folder != "" {
+		displayName = summary.Folder + "/" + summary.Name
+	}
+	if query != "" && !strings.Contains(strings.ToLower(endpoint.Label+" "+displayName+" "+summary.Path), query) {
+		return
+	}
+	target := endpoint.Target
+	jump := append([]string(nil), endpoint.Via...)
+	if summary.Target != "" {
+		route := append(append([]string(nil), jump...), endpoint.Target)
+		route = append(route, summary.Jump...)
+		route = append(route, summary.Target)
+		if len(route) > herdrhub.MaxRouteDepth {
+			return
+		}
+		seen := make(map[string]bool, len(route))
+		for _, hop := range route {
+			if seen[hop] {
+				return
+			}
+			seen[hop] = true
+		}
+		jump = append([]string(nil), route[:len(route)-1]...)
+		target = summary.Target
+	}
+	ws := &workspace.Workspace{
+		Name:        summary.Name,
+		Path:        summary.Path,
+		Folder:      summary.Folder,
+		QuickAccess: summary.QuickAccess,
+		Remote:      &workspace.Remote{Host: target, Path: summary.Path, Jump: jump},
+		Layout:      workspace.Layout{Type: workspace.LayoutNone},
+	}
+	name := strings.Repeat("  ", depth) + displayName
+	if flat {
+		name = displayName + " · " + endpoint.Label
+	}
+	endpointCopy := endpoint
+	l.items = append(l.items, ListItem{Type: "workspace", Name: name, Workspace: ws, Endpoint: &endpointCopy})
 }
 
 func hubEndpointStatus(snapshot herdrhub.Snapshot) string {
@@ -311,11 +407,18 @@ func hubAuthenticationGuidance(endpoint *herdrhub.Endpoint, snapshot herdrhub.Sn
 	if err := herdrhub.ValidateEndpoint(*endpoint); err != nil {
 		return "SSH authentication required. Edit this host and enter a valid destination."
 	}
+	jumpOption := ""
+	jumpFlag := ""
+	if len(endpoint.Via) > 0 {
+		route := strings.Join(endpoint.Via, ",")
+		jumpOption = "-o ProxyJump=" + route + " "
+		jumpFlag = "-J " + route + " "
+	}
 	return "[enter]open/authenticate — OpenSSH will ask for password or key passphrase\n" +
 		"Background refresh needs non-interactive SSH\n" +
 		"Encrypted key: ssh-add ~/.ssh/<private-key>\n" +
-		"Install key: ssh-copy-id " + endpoint.Target + "\n" +
-		"Verify refresh: ssh -o BatchMode=yes " + endpoint.Target + " true"
+		"Install key: ssh-copy-id " + jumpOption + endpoint.Target + "\n" +
+		"Verify refresh: ssh -o BatchMode=yes " + jumpFlag + endpoint.Target + " true"
 }
 
 func (l *ListView) herdrEndpointGuidanceView() string {
@@ -324,7 +427,7 @@ func (l *ListView) herdrEndpointGuidanceView() string {
 		return ""
 	}
 	for _, snapshot := range l.hubSnapshots {
-		if snapshot.EndpointID == selected.Endpoint.ID {
+		if snapshot.EndpointID == selected.Endpoint.Key() {
 			return hubAuthenticationGuidance(selected.Endpoint, snapshot)
 		}
 	}
@@ -338,18 +441,41 @@ func (l *ListView) ToggleHerdrEndpoint(id string) {
 	if l.hubCollapsed == nil {
 		l.hubCollapsed = make(map[string]bool)
 	}
+	if l.hubCollapseKnown == nil {
+		l.hubCollapseKnown = make(map[string]bool)
+	}
+	l.hubCollapseKnown[id] = true
 	l.hubCollapsed[id] = !l.hubCollapsed[id]
 	l.refreshItems()
 }
 
+func (l *ListView) ExpandHerdrEndpoint(id string) {
+	if id == "" {
+		return
+	}
+	if l.hubCollapsed == nil {
+		l.hubCollapsed = make(map[string]bool)
+	}
+	if l.hubCollapseKnown == nil {
+		l.hubCollapseKnown = make(map[string]bool)
+	}
+	l.hubCollapseKnown[id] = true
+	l.hubCollapsed[id] = false
+	l.refreshItems()
+}
+
+func listItemIsHeader(item ListItem) bool {
+	return item.Type == "header" || item.Type == "remote_header"
+}
+
 func (l *ListView) skipHeaders(direction int) {
-	for l.cursor >= 0 && l.cursor < len(l.items) && l.items[l.cursor].Type == "header" {
+	for l.cursor >= 0 && l.cursor < len(l.items) && listItemIsHeader(l.items[l.cursor]) {
 		l.cursor += direction
 	}
 	if l.cursor < 0 {
 		// find first non-header from start
 		for l.cursor = 0; l.cursor < len(l.items); l.cursor++ {
-			if l.items[l.cursor].Type != "header" {
+			if !listItemIsHeader(l.items[l.cursor]) {
 				return
 			}
 		}
@@ -357,7 +483,7 @@ func (l *ListView) skipHeaders(direction int) {
 	} else if l.cursor >= len(l.items) {
 		// find last non-header from end
 		for l.cursor = len(l.items) - 1; l.cursor >= 0; l.cursor-- {
-			if l.items[l.cursor].Type != "header" {
+			if !listItemIsHeader(l.items[l.cursor]) {
 				return
 			}
 		}
@@ -410,7 +536,7 @@ func (l *ListView) visibleRange() (int, int) {
 func (l *ListView) visibleOrdinal(itemIndex, start int) int {
 	ordinal := 0
 	for i := start; i <= itemIndex && i < len(l.items); i++ {
-		if l.items[i].Type == "header" {
+		if listItemIsHeader(l.items[i]) {
 			continue
 		}
 		if i == itemIndex {
@@ -425,7 +551,7 @@ func (l *ListView) selectVisibleNumber(key string) bool {
 	start, end := l.visibleRange()
 	selectable := make([]int, 0, end-start)
 	for i := start; i < end && len(selectable) < 9; i++ {
-		if l.items[i].Type != "header" {
+		if !listItemIsHeader(l.items[i]) {
 			selectable = append(selectable, i)
 		}
 	}
@@ -639,6 +765,9 @@ func (l *ListView) View() string {
 				}
 				b.WriteString(labelStyle.Render(item.Name))
 				b.WriteString("\n")
+			case "remote_header":
+				b.WriteString(mutedStyle.Render(item.Name))
+				b.WriteString("\n")
 			case "herdr_endpoint":
 				if strings.Contains(item.Name, "This Mac") {
 					dividerWidth := l.width - 4
@@ -677,7 +806,7 @@ func (l *ListView) View() string {
 					style = selectedStyle
 				}
 				ws := item.Workspace
-				name := style.Render(ws.Name)
+				name := style.Render(item.Name)
 
 				// Show path - for remote show host:path
 				var pathStr string

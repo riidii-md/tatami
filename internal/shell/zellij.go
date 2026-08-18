@@ -135,25 +135,14 @@ func (z *ZellijRunner) RunPane(path, direction, command string) error {
 	return cmd.Run()
 }
 
-// buildSSHCmd builds an SSH command string with optional key and command
-func buildSSHCmd(host, key, remotePath, command string) string {
-	var sshPart string
-	if key != "" {
-		sshPart = fmt.Sprintf("ssh -i %s %s", key, host)
-	} else {
-		sshPart = fmt.Sprintf("ssh %s", host)
-	}
-
-	if command != "" {
-		return fmt.Sprintf("%s -t 'cd %s && %s'", sshPart, remotePath, command)
-	}
-	// Use $SHELL on the remote side, not local
-	return fmt.Sprintf("%s -t 'cd %s && exec $SHELL'", sshPart, remotePath)
-}
-
 // NewTabSSH opens a new tab with an SSH session to a remote host
 func (z *ZellijRunner) NewTabSSH(host, key, remotePath, name string) error {
-	sshCmd := buildSSHCmd(host, key, remotePath, "")
+	return z.NewTabSSHRemote(&workspace.Remote{Host: host, Key: key, Path: remotePath}, name)
+}
+
+// NewTabSSHRemote opens a new tab using the complete remote route.
+func (z *ZellijRunner) NewTabSSHRemote(remote *workspace.Remote, name string) error {
+	sshCmd := BuildRemoteSSHCommand(remote, "")
 
 	args := []string{"action", "new-tab"}
 	if name != "" {
@@ -170,7 +159,12 @@ func (z *ZellijRunner) NewTabSSH(host, key, remotePath, name string) error {
 
 // NewPaneSSH opens a new pane with an SSH session to a remote host
 func (z *ZellijRunner) NewPaneSSH(host, key, remotePath, direction string) error {
-	sshCmd := buildSSHCmd(host, key, remotePath, "")
+	return z.NewPaneSSHRemote(&workspace.Remote{Host: host, Key: key, Path: remotePath}, direction)
+}
+
+// NewPaneSSHRemote opens a new pane using the complete remote route.
+func (z *ZellijRunner) NewPaneSSHRemote(remote *workspace.Remote, direction string) error {
+	sshCmd := BuildRemoteSSHCommand(remote, "")
 
 	args := []string{"run"}
 	if direction != "" {
@@ -186,7 +180,12 @@ func (z *ZellijRunner) NewPaneSSH(host, key, remotePath, direction string) error
 
 // RunPaneSSH opens a new pane with SSH and runs a command
 func (z *ZellijRunner) RunPaneSSH(host, key, remotePath, direction, command string) error {
-	sshCmd := buildSSHCmd(host, key, remotePath, command)
+	return z.RunPaneSSHRemote(&workspace.Remote{Host: host, Key: key, Path: remotePath}, direction, command)
+}
+
+// RunPaneSSHRemote opens a new pane through the complete route and runs a command.
+func (z *ZellijRunner) RunPaneSSHRemote(remote *workspace.Remote, direction, command string) error {
+	sshCmd := BuildRemoteSSHCommand(remote, command)
 
 	args := []string{"run"}
 	if direction != "" {
@@ -202,18 +201,14 @@ func (z *ZellijRunner) RunPaneSSH(host, key, remotePath, direction, command stri
 
 // RunWithLayoutSSH opens a remote workspace with its configured layout via SSH
 func (z *ZellijRunner) RunWithLayoutSSH(ws *workspace.Workspace) error {
-	host := ws.Remote.Host
-	key := ws.Remote.Key
-	remotePath := ws.Remote.Path
-
 	// First, create a new tab with SSH
-	if err := z.NewTabSSH(host, key, remotePath, ws.Name); err != nil {
+	if err := z.NewTabSSHRemote(ws.Remote, ws.Name); err != nil {
 		return fmt.Errorf("failed to create tab: %w", err)
 	}
 
 	// Then create panes for the layout
 	for _, pane := range ws.Layout.Panes {
-		if err := z.RunPaneSSH(host, key, remotePath, pane.Direction, pane.Command); err != nil {
+		if err := z.RunPaneSSHRemote(ws.Remote, pane.Direction, pane.Command); err != nil {
 			return fmt.Errorf("failed to create pane: %w", err)
 		}
 	}

@@ -51,6 +51,7 @@ type Result struct {
 	// session selected from the federated hub. They are empty for local rows.
 	HerdrEndpointID string
 	HerdrTarget     string
+	HerdrVia        []string
 }
 
 type herdrSessionLister func() ([]shell.HerdrSession, error)
@@ -79,7 +80,7 @@ type herdrHubRefresher func(context.Context, []herdrhub.Endpoint, herdrhub.Cache
 type herdrHubCacheSaver func(herdrhub.Cache) error
 type herdrHubEndpointSaver func([]herdrhub.Endpoint) error
 type herdrHubAgentQuery func(context.Context, herdrhub.Endpoint, string) ([]herdrhub.Agent, error)
-type herdrHubInteractiveSessionLister func(context.Context, herdrhub.Endpoint, io.Reader, io.Writer) ([]herdrhub.Session, error)
+type herdrHubInteractiveInventory func(context.Context, herdrhub.Endpoint, io.Reader, io.Writer) (herdrhub.Snapshot, error)
 
 // WithHerdrHubSnapshots renders safe cached remote inventory immediately.
 func WithHerdrHubSnapshots(endpoints []herdrhub.Endpoint, snapshots []herdrhub.Snapshot) AppOption {
@@ -96,8 +97,8 @@ func WithHerdrHubEndpointSaver(save herdrHubEndpointSaver) AppOption {
 func WithHerdrHubAgentQuery(query herdrHubAgentQuery) AppOption {
 	return func(a *App) { a.herdrHubAgentQuery = query }
 }
-func WithHerdrHubInteractiveSessionLister(lister herdrHubInteractiveSessionLister) AppOption {
-	return func(a *App) { a.herdrHubSessionLister = lister }
+func WithHerdrHubInteractiveInventory(query herdrHubInteractiveInventory) AppOption {
+	return func(a *App) { a.herdrHubInteractiveInventory = query }
 }
 
 // WithNewTabMode adapts workspace actions for a dedicated terminal tab. The
@@ -145,51 +146,51 @@ func WithHerdrSessionUsageCollector(collector func(string) (systemusage.Report, 
 
 // App is the main Bubbletea model
 type App struct {
-	store                      *workspace.Store
-	zellij                     *shell.ZellijRunner
-	tmux                       *shell.TmuxRunner
-	currentView                View
-	previousView               View
-	listView                   *ListView
-	createView                 *CreateView
-	actionsView                *ActionView
-	layoutEditor               *LayoutEditor
-	templateView               *TemplateView
-	folderInput                *FolderInput
-	worktreeView               *WorktreeView
-	worktreeActionView         *WorktreeActionView
-	sessionView                *SessionView
-	herdrOpenModeView          *HerdrOpenModeView
-	herdrSessionNameView       *HerdrSessionNameView
-	herdrSessionPickerView     *HerdrSessionPickerView
-	herdrSessionDeleteView     *HerdrSessionDeleteView
-	pendingHerdrResult         *Result
-	herdrOpenBackView          View
-	result                     *Result
-	width                      int
-	height                     int
-	err                        error
-	newTabMode                 bool
-	mobileMode                 bool
-	herdrSessionLister         herdrSessionLister
-	herdrSessionStopper        herdrSessionStopper
-	herdrSessionDeleter        herdrSessionDeleter
-	herdrSessionUsageCollector herdrSessionUsageCollector
-	herdrUsageGeneration       uint64
-	hubEndpoints               []herdrhub.Endpoint
-	hubSnapshots               []herdrhub.Snapshot
-	herdrHubRefresher          herdrHubRefresher
-	herdrHubCacheSaver         herdrHubCacheSaver
-	herdrHubGeneration         uint64
-	herdrHubCancel             context.CancelFunc
-	herdrHubEndpointSaver      herdrHubEndpointSaver
-	herdrHostView              *HerdrHostView
-	herdrHostEditingID         string
-	herdrHubAgentQuery         herdrHubAgentQuery
-	herdrHubSessionLister      herdrHubInteractiveSessionLister
-	herdrHubAgentGeneration    uint64
-	herdrHubAgentCancel        context.CancelFunc
-	herdrHostDeleteView        *HerdrHostDeleteView
+	store                        *workspace.Store
+	zellij                       *shell.ZellijRunner
+	tmux                         *shell.TmuxRunner
+	currentView                  View
+	previousView                 View
+	listView                     *ListView
+	createView                   *CreateView
+	actionsView                  *ActionView
+	layoutEditor                 *LayoutEditor
+	templateView                 *TemplateView
+	folderInput                  *FolderInput
+	worktreeView                 *WorktreeView
+	worktreeActionView           *WorktreeActionView
+	sessionView                  *SessionView
+	herdrOpenModeView            *HerdrOpenModeView
+	herdrSessionNameView         *HerdrSessionNameView
+	herdrSessionPickerView       *HerdrSessionPickerView
+	herdrSessionDeleteView       *HerdrSessionDeleteView
+	pendingHerdrResult           *Result
+	herdrOpenBackView            View
+	result                       *Result
+	width                        int
+	height                       int
+	err                          error
+	newTabMode                   bool
+	mobileMode                   bool
+	herdrSessionLister           herdrSessionLister
+	herdrSessionStopper          herdrSessionStopper
+	herdrSessionDeleter          herdrSessionDeleter
+	herdrSessionUsageCollector   herdrSessionUsageCollector
+	herdrUsageGeneration         uint64
+	hubEndpoints                 []herdrhub.Endpoint
+	hubSnapshots                 []herdrhub.Snapshot
+	herdrHubRefresher            herdrHubRefresher
+	herdrHubCacheSaver           herdrHubCacheSaver
+	herdrHubGeneration           uint64
+	herdrHubCancel               context.CancelFunc
+	herdrHubEndpointSaver        herdrHubEndpointSaver
+	herdrHostView                *HerdrHostView
+	herdrHostEditingID           string
+	herdrHubAgentQuery           herdrHubAgentQuery
+	herdrHubInteractiveInventory herdrHubInteractiveInventory
+	herdrHubAgentGeneration      uint64
+	herdrHubAgentCancel          context.CancelFunc
+	herdrHostDeleteView          *HerdrHostDeleteView
 }
 
 // NewApp creates a new App
@@ -257,10 +258,10 @@ func (a *App) scheduleSelectedHubAgents() tea.Cmd {
 	session := s.Herdr.Name
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	a.herdrHubAgentCancel = cancel
-	a.listView.SetHerdrHubAgentsLoading(endpoint.ID, session)
+	a.listView.SetHerdrHubAgentsLoading(endpoint.Key(), session)
 	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
 		agents, err := a.herdrHubAgentQuery(ctx, endpoint, session)
-		return herdrHubAgentsResultMsg{EndpointID: endpoint.ID, Session: session, Generation: generation, Agents: agents, Err: err}
+		return herdrHubAgentsResultMsg{EndpointID: endpoint.Key(), Session: session, Generation: generation, Agents: agents, Err: err}
 	})
 }
 
@@ -279,37 +280,37 @@ type herdrHubRefreshResultMsg struct {
 	Snapshots  []herdrhub.Snapshot
 }
 
-type herdrHubInteractiveSessionsMsg struct {
+type herdrHubInteractiveInventoryMsg struct {
 	Endpoint herdrhub.Endpoint
-	Sessions []herdrhub.Session
+	Snapshot herdrhub.Snapshot
 	Err      error
 }
 
-type herdrHubInteractiveListCommand struct {
+type herdrHubInteractiveInventoryCommand struct {
 	endpoint herdrhub.Endpoint
-	lister   herdrHubInteractiveSessionLister
+	query    herdrHubInteractiveInventory
 	stdin    io.Reader
 	stderr   io.Writer
-	sessions []herdrhub.Session
+	snapshot herdrhub.Snapshot
 }
 
-func (c *herdrHubInteractiveListCommand) SetStdin(stdin io.Reader)   { c.stdin = stdin }
-func (c *herdrHubInteractiveListCommand) SetStdout(io.Writer)        {}
-func (c *herdrHubInteractiveListCommand) SetStderr(stderr io.Writer) { c.stderr = stderr }
-func (c *herdrHubInteractiveListCommand) Run() error {
-	sessions, err := c.lister(context.Background(), c.endpoint, c.stdin, c.stderr)
-	c.sessions = sessions
+func (c *herdrHubInteractiveInventoryCommand) SetStdin(stdin io.Reader)   { c.stdin = stdin }
+func (c *herdrHubInteractiveInventoryCommand) SetStdout(io.Writer)        {}
+func (c *herdrHubInteractiveInventoryCommand) SetStderr(stderr io.Writer) { c.stderr = stderr }
+func (c *herdrHubInteractiveInventoryCommand) Run() error {
+	snapshot, err := c.query(context.Background(), c.endpoint, c.stdin, c.stderr)
+	c.snapshot = snapshot
 	return err
 }
 
-func (a *App) scheduleInteractiveHerdrSessions(endpoint herdrhub.Endpoint) tea.Cmd {
-	if a.herdrHubSessionLister == nil {
-		a.openRemoteHerdrSessionPicker(endpoint, nil, fmt.Errorf("interactive remote session discovery is unavailable"))
+func (a *App) scheduleInteractiveHerdrInventory(endpoint herdrhub.Endpoint) tea.Cmd {
+	if a.herdrHubInteractiveInventory == nil {
+		a.err = fmt.Errorf("interactive remote Tatami discovery is unavailable")
 		return nil
 	}
-	command := &herdrHubInteractiveListCommand{endpoint: endpoint, lister: a.herdrHubSessionLister}
+	command := &herdrHubInteractiveInventoryCommand{endpoint: endpoint, query: a.herdrHubInteractiveInventory}
 	return tea.Exec(command, func(err error) tea.Msg {
-		return herdrHubInteractiveSessionsMsg{Endpoint: endpoint, Sessions: command.sessions, Err: err}
+		return herdrHubInteractiveInventoryMsg{Endpoint: endpoint, Snapshot: command.snapshot, Err: err}
 	})
 }
 
@@ -371,7 +372,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		s := a.listView.Selected()
-		if s == nil || s.Endpoint == nil || s.Herdr == nil || s.Endpoint.ID != msg.EndpointID || s.Herdr.Name != msg.Session {
+		if s == nil || s.Endpoint == nil || s.Herdr == nil || s.Endpoint.Key() != msg.EndpointID || s.Herdr.Name != msg.Session {
 			return a, nil
 		}
 		a.listView.SetHerdrHubAgents(msg.EndpointID, msg.Session, msg.Agents, msg.Err)
@@ -380,8 +381,20 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.herdrHubAgentCancel = nil
 		}
 		return a, nil
-	case herdrHubInteractiveSessionsMsg:
-		a.openRemoteHerdrSessionPicker(msg.Endpoint, msg.Sessions, msg.Err)
+	case herdrHubInteractiveInventoryMsg:
+		if msg.Err != nil {
+			a.err = msg.Err
+			return a, nil
+		}
+		a.hubSnapshots = mergeHubSnapshots(a.hubEndpoints, a.hubSnapshots, []herdrhub.Snapshot{msg.Snapshot})
+		a.listView.SetHerdrHubSnapshots(a.hubEndpoints, a.hubSnapshots)
+		a.listView.ExpandHerdrEndpoint(msg.Endpoint.Key())
+		if a.herdrHubCacheSaver != nil {
+			if err := a.herdrHubCacheSaver(herdrhub.Cache{Snapshots: a.hubSnapshots}); err != nil {
+				a.err = err
+			}
+		}
+		a.currentView = ViewList
 		return a, nil
 
 	case herdrUsageRequestMsg:
@@ -472,13 +485,27 @@ func mergeHubSnapshots(endpoints []herdrhub.Endpoint, current, updates []herdrhu
 	for _, snapshot := range updates {
 		byID[snapshot.EndpointID] = snapshot
 	}
-	merged := make([]herdrhub.Snapshot, 0, len(endpoints))
+	merged := make([]herdrhub.Snapshot, 0, len(byID))
+	added := make(map[string]bool, len(byID))
 	for _, endpoint := range endpoints {
 		if endpoint.ID == herdrhub.LocalEndpointID {
 			continue
 		}
-		if snapshot, ok := byID[endpoint.ID]; ok {
+		if snapshot, ok := byID[endpoint.Key()]; ok {
 			merged = append(merged, snapshot)
+			added[snapshot.EndpointID] = true
+		}
+	}
+	for _, snapshot := range current {
+		if !added[snapshot.EndpointID] {
+			merged = append(merged, byID[snapshot.EndpointID])
+			added[snapshot.EndpointID] = true
+		}
+	}
+	for _, snapshot := range updates {
+		if !added[snapshot.EndpointID] {
+			merged = append(merged, snapshot)
+			added[snapshot.EndpointID] = true
 		}
 	}
 	return merged
@@ -491,7 +518,7 @@ func (a *App) selectedHerdrUsageKey() string {
 	}
 	endpointID := herdrhub.LocalEndpointID
 	if selected.Endpoint != nil {
-		endpointID = selected.Endpoint.ID
+		endpointID = selected.Endpoint.Key()
 	}
 	return fmt.Sprintf("%s:%s:%t", endpointID, selected.Herdr.Name, selected.Herdr.Running)
 }
@@ -610,7 +637,7 @@ func (a *App) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case " ":
 		item := a.listView.Selected()
 		if item != nil && item.Type == "herdr_endpoint" && item.Endpoint != nil {
-			a.listView.ToggleHerdrEndpoint(item.Endpoint.ID)
+			a.listView.ToggleHerdrEndpoint(item.Endpoint.Key())
 		}
 		return a, nil
 	case "r":
@@ -650,14 +677,14 @@ func (a *App) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if item.Endpoint != nil {
 				if item.Endpoint.ID != herdrhub.LocalEndpointID {
 					for _, snapshot := range a.hubSnapshots {
-						if snapshot.EndpointID == item.Endpoint.ID && snapshot.State == herdrhub.StateOnline {
-							a.openRemoteHerdrSessionPicker(*item.Endpoint, snapshot.Sessions, nil)
+						if snapshot.EndpointID == item.Endpoint.Key() && snapshot.State == herdrhub.StateOnline {
+							a.listView.ExpandHerdrEndpoint(item.Endpoint.Key())
 							return a, nil
 						}
 					}
-					return a, a.scheduleInteractiveHerdrSessions(*item.Endpoint)
+					return a, a.scheduleInteractiveHerdrInventory(*item.Endpoint)
 				}
-				a.listView.ToggleHerdrEndpoint(item.Endpoint.ID)
+				a.listView.ToggleHerdrEndpoint(item.Endpoint.Key())
 			}
 		case "folder":
 			a.listView.EnterFolder(item.Name)
@@ -671,8 +698,9 @@ func (a *App) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				SessionName: item.Herdr.Name,
 			}
 			if item.Endpoint != nil {
-				a.result.HerdrEndpointID = item.Endpoint.ID
+				a.result.HerdrEndpointID = item.Endpoint.Key()
 				a.result.HerdrTarget = item.Endpoint.Target
+				a.result.HerdrVia = append([]string(nil), item.Endpoint.Via...)
 			}
 			return a, tea.Quit
 		}
@@ -693,11 +721,11 @@ func (a *App) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "e":
 		item := a.listView.Selected()
-		if item != nil && item.Type == "workspace" {
+		if item != nil && item.Type == "workspace" && item.Endpoint == nil {
 			a.createView.EditWorkspace(item.Workspace)
 			a.currentView = ViewCreate
 		}
-		if item != nil && item.Type == "herdr_endpoint" && item.Endpoint != nil && item.Endpoint.ID != herdrhub.LocalEndpointID {
+		if item != nil && item.Type == "herdr_endpoint" && item.Endpoint != nil && item.Endpoint.ID != herdrhub.LocalEndpointID && item.Endpoint.NodeID == "" {
 			a.herdrHostView = NewHerdrHostView(*item.Endpoint)
 			a.applyMobileMode(a.herdrHostView)
 			a.herdrHostEditingID = item.Endpoint.ID
@@ -707,12 +735,12 @@ func (a *App) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "d":
 		item := a.listView.Selected()
-		if item != nil && item.Type == "workspace" {
+		if item != nil && item.Type == "workspace" && item.Endpoint == nil {
 			if err := a.store.Delete(item.Workspace.Name); err == nil {
 				a.listView.Refresh()
 			}
 		}
-		if item != nil && item.Type == "herdr_endpoint" && item.Endpoint != nil && item.Endpoint.ID != herdrhub.LocalEndpointID {
+		if item != nil && item.Type == "herdr_endpoint" && item.Endpoint != nil && item.Endpoint.ID != herdrhub.LocalEndpointID && item.Endpoint.NodeID == "" {
 			a.herdrHostDeleteView = NewHerdrHostDeleteView(*item.Endpoint)
 			a.applyMobileMode(a.herdrHostDeleteView)
 			a.currentView = ViewHerdrHostDelete
@@ -746,7 +774,7 @@ func (a *App) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "*", "s":
 		// Toggle quick access
 		item := a.listView.Selected()
-		if item != nil && item.Type == "workspace" {
+		if item != nil && item.Type == "workspace" && item.Endpoint == nil {
 			a.store.ToggleQuickAccess(item.Workspace.Name)
 			a.listView.Refresh()
 		}

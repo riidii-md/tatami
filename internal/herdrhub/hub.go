@@ -42,7 +42,21 @@ type Endpoint struct {
 	Label  string       `json:"label"`
 	Kind   EndpointKind `json:"kind,omitempty"`
 	Target string       `json:"target,omitempty"`
+	// NodeID and Via are local routing state. They are never accepted from or
+	// emitted to a remote host inventory.
+	NodeID string   `json:"-"`
+	Via    []string `json:"-"`
 }
+
+// Key identifies one appearance of an endpoint in the federated tree. Saved
+// endpoint IDs are host-local, while descendant keys include their ancestry.
+func (e Endpoint) Key() string {
+	if e.NodeID != "" {
+		return e.NodeID
+	}
+	return e.ID
+}
+
 type SessionKey struct {
 	EndpointID  string `json:"endpoint_id"`
 	SessionName string `json:"session_name"`
@@ -61,12 +75,15 @@ type Agent struct {
 	CWD    string
 }
 type Snapshot struct {
-	EndpointID  string        `json:"endpoint_id"`
-	State       EndpointState `json:"state"`
-	Sessions    []Session     `json:"sessions"`
-	LastSuccess time.Time     `json:"last_success,omitempty"`
-	Latency     time.Duration `json:"latency,omitempty"`
-	Error       string        `json:"-"`
+	EndpointID  string             `json:"endpoint_id"`
+	State       EndpointState      `json:"state"`
+	Host        string             `json:"host,omitempty"`
+	Workspaces  []WorkspaceSummary `json:"workspaces,omitempty"`
+	Sessions    []Session          `json:"sessions"`
+	Hosts       []Endpoint         `json:"hosts,omitempty"`
+	LastSuccess time.Time          `json:"last_success,omitempty"`
+	Latency     time.Duration      `json:"latency,omitempty"`
+	Error       string             `json:"-"`
 }
 
 func LocalEndpoint() Endpoint {
@@ -286,6 +303,7 @@ type Cache struct {
 }
 
 const CacheVersion = 1
+const MaxCacheSnapshots = 4096
 
 func LoadCache(path string) (Cache, error) {
 	b, err := os.ReadFile(path)
@@ -320,8 +338,22 @@ func SaveCache(path string, c Cache) error {
 }
 
 func validateCache(c Cache) error {
+	if len(c.Snapshots) > MaxCacheSnapshots {
+		return errors.New("cached Tatami inventory exceeds supported limits")
+	}
+	seenSnapshots := make(map[string]bool, len(c.Snapshots))
 	for i := range c.Snapshots {
 		snapshot := &c.Snapshots[i]
+		if strings.TrimSpace(snapshot.EndpointID) == "" {
+			return errors.New("cached endpoint id is required")
+		}
+		if err := validateDisplayField("cached endpoint id", snapshot.EndpointID, 512); err != nil {
+			return err
+		}
+		if seenSnapshots[snapshot.EndpointID] {
+			return fmt.Errorf("duplicate cached endpoint id %q", snapshot.EndpointID)
+		}
+		seenSnapshots[snapshot.EndpointID] = true
 		switch snapshot.State {
 		case StateLoading, StateOnline, StateOffline, StateAuthenticationNeeded, StateIncompatible, StateStale:
 		default:
@@ -332,6 +364,28 @@ func validateCache(c Cache) error {
 				return fmt.Errorf("unsafe cached session: %w", err)
 			}
 			snapshot.Sessions[j].EndpointID = snapshot.EndpointID
+		}
+		if err := validateDisplayField("cached inventory host", snapshot.Host, 128); err != nil {
+			return err
+		}
+		if len(snapshot.Workspaces) > MaxInventoryWorkspaces || len(snapshot.Sessions) > MaxInventorySessions || len(snapshot.Hosts) > MaxInventoryHosts {
+			return errors.New("cached Tatami inventory exceeds supported limits")
+		}
+		for _, summary := range snapshot.Workspaces {
+			if err := validateWorkspaceSummary(summary); err != nil {
+				return fmt.Errorf("unsafe cached workspace: %w", err)
+			}
+		}
+		seenHosts := make(map[string]bool, len(snapshot.Hosts))
+		for i := range snapshot.Hosts {
+			snapshot.Hosts[i].Kind = EndpointSSH
+			if err := ValidateEndpoint(snapshot.Hosts[i]); err != nil {
+				return fmt.Errorf("unsafe cached host: %w", err)
+			}
+			if seenHosts[snapshot.Hosts[i].ID] {
+				return fmt.Errorf("duplicate cached host id %q", snapshot.Hosts[i].ID)
+			}
+			seenHosts[snapshot.Hosts[i].ID] = true
 		}
 	}
 	return nil
@@ -405,15 +459,16 @@ func (OSExecutor) Output(ctx context.Context, name string, args ...string) (Exec
 
 func (OSInteractiveExecutor) OutputInteractive(ctx context.Context, stdin io.Reader, stderr io.Writer, name string, args ...string) (ExecResult, error) {
 	stdout := &boundedOutput{limit: 2 << 20}
+	stderrCapture := &boundedOutput{limit: 4096}
 	command := exec.CommandContext(ctx, name, args...)
 	command.Stdin = stdin
 	command.Stdout = stdout
-	command.Stderr = stderr
+	command.Stderr = io.MultiWriter(stderr, stderrCapture)
 	err := command.Run()
 	if stdout.truncated && err == nil {
 		err = errors.New("Herdr inventory output exceeded 2 MiB")
 	}
-	return ExecResult{Stdout: stdout.data}, err
+	return ExecResult{Stdout: stdout.data, Stderr: stderrCapture.data}, err
 }
 
 type Client struct {
@@ -438,19 +493,29 @@ func QueryArgs(e Endpoint) (string, []string, error) {
 	if e.ID == LocalEndpointID || e.Kind == EndpointLocal {
 		return "herdr", []string{"session", "list", "--json"}, nil
 	}
-	if err := ValidateEndpoint(e); err != nil {
+	if err := validateRoutedEndpoint(e); err != nil {
 		return "", nil, err
 	}
-	return "ssh", []string{"-o", "BatchMode=yes", "--", e.Target, "herdr", "session", "list", "--json"}, nil
+	args := []string{"-o", "BatchMode=yes"}
+	if len(e.Via) > 0 {
+		args = append(args, "-J", strings.Join(e.Via, ","))
+	}
+	args = append(args, "--", e.Target, "herdr", "session", "list", "--json")
+	return "ssh", args, nil
 }
 func InteractiveQueryArgs(e Endpoint) (string, []string, error) {
 	if e.ID == LocalEndpointID || e.Kind == EndpointLocal {
 		return "herdr", []string{"session", "list", "--json"}, nil
 	}
-	if err := ValidateEndpoint(e); err != nil {
+	if err := validateRoutedEndpoint(e); err != nil {
 		return "", nil, err
 	}
-	return "ssh", []string{"--", e.Target, "herdr", "session", "list", "--json"}, nil
+	args := make([]string, 0, 10)
+	if len(e.Via) > 0 {
+		args = append(args, "-J", strings.Join(e.Via, ","))
+	}
+	args = append(args, "--", e.Target, "herdr", "session", "list", "--json")
+	return "ssh", args, nil
 }
 func AttachArgs(e Endpoint, session string) (string, []string, error) {
 	if strings.TrimSpace(session) == "" {
@@ -459,11 +524,18 @@ func AttachArgs(e Endpoint, session string) (string, []string, error) {
 	if e.ID == LocalEndpointID || e.Kind == EndpointLocal {
 		return "herdr", []string{"--session", session}, nil
 	}
-	if err := ValidateEndpoint(e); err != nil {
+	if err := validateRoutedEndpoint(e); err != nil {
 		return "", nil, err
 	}
 	if err := validateRemoteSessionName(session); err != nil {
 		return "", nil, err
+	}
+	if len(e.Via) > 0 {
+		return "ssh", []string{
+			"-J", strings.Join(e.Via, ","),
+			"-t", "--", e.Target,
+			"herdr", "--session", session,
+		}, nil
 	}
 	return "herdr", []string{"--remote", e.Target, "--session", session}, nil
 }
@@ -474,13 +546,18 @@ func AgentArgs(e Endpoint, session string) (string, []string, error) {
 	if e.ID == LocalEndpointID || e.Kind == EndpointLocal {
 		return "herdr", []string{"--session", session, "agent", "list"}, nil
 	}
-	if err := ValidateEndpoint(e); err != nil {
+	if err := validateRoutedEndpoint(e); err != nil {
 		return "", nil, err
 	}
 	if err := validateRemoteSessionName(session); err != nil {
 		return "", nil, err
 	}
-	return "ssh", []string{"-o", "BatchMode=yes", "--", e.Target, "herdr", "--session", session, "agent", "list"}, nil
+	args := []string{"-o", "BatchMode=yes"}
+	if len(e.Via) > 0 {
+		args = append(args, "-J", strings.Join(e.Via, ","))
+	}
+	args = append(args, "--", e.Target, "herdr", "--session", session, "agent", "list")
+	return "ssh", args, nil
 }
 func (c *Client) QueryAgents(ctx context.Context, e Endpoint, session string) ([]Agent, error) {
 	name, args, err := AgentArgs(e, session)
@@ -502,7 +579,39 @@ func (c *Client) QueryInteractive(ctx context.Context, e Endpoint, stdin io.Read
 	if err != nil {
 		return nil, fmt.Errorf("interactive endpoint query failed: %w", err)
 	}
-	return ParseSessions(e.ID, result.Stdout)
+	return ParseSessions(e.Key(), result.Stdout)
+}
+
+func (c *Client) QueryInventoryInteractive(ctx context.Context, e Endpoint, stdin io.Reader, stderr io.Writer) (Snapshot, error) {
+	start := time.Now()
+	name, args, err := InventoryQueryArgs(e, false)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	result, queryErr := c.interactive.OutputInteractive(ctx, stdin, stderr, name, args...)
+	if queryErr == nil {
+		inventory, parseErr := ParseInventory(result.Stdout)
+		if parseErr != nil {
+			return Snapshot{}, parseErr
+		}
+		return snapshotFromInventory(e, inventory, time.Since(start)), nil
+	}
+	if state := stateForError(ctx, queryErr, result.Stderr); state == StateAuthenticationNeeded || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return Snapshot{}, fmt.Errorf("interactive endpoint query failed: %w", queryErr)
+	}
+	name, args, err = InteractiveQueryArgs(e)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	result, err = c.interactive.OutputInteractive(ctx, stdin, stderr, name, args...)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("interactive endpoint query failed: %w", err)
+	}
+	sessions, err := ParseSessions(e.Key(), result.Stdout)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return Snapshot{EndpointID: e.Key(), State: StateOnline, Sessions: sessions, LastSuccess: time.Now().UTC(), Latency: time.Since(start)}, nil
 }
 func ParseAgents(data []byte) ([]Agent, error) {
 	var response struct {
@@ -538,19 +647,57 @@ func ParseAgents(data []byte) ([]Agent, error) {
 }
 func (c *Client) Query(ctx context.Context, e Endpoint) Snapshot {
 	start := time.Now()
-	name, args, err := QueryArgs(e)
+	name, args, err := InventoryQueryArgs(e, true)
 	if err != nil {
-		return Snapshot{EndpointID: e.ID, State: StateIncompatible, Error: err.Error()}
+		return Snapshot{EndpointID: e.Key(), State: StateIncompatible, Error: err.Error()}
 	}
 	result, err := c.exec.Output(ctx, name, args...)
-	if err != nil {
-		return Snapshot{EndpointID: e.ID, State: stateForError(ctx, err, result.Stderr), Latency: time.Since(start), Error: "endpoint query failed"}
+	if err == nil {
+		inventory, parseErr := ParseInventory(result.Stdout)
+		if parseErr != nil {
+			return Snapshot{EndpointID: e.Key(), State: StateIncompatible, Latency: time.Since(start), Error: parseErr.Error()}
+		}
+		return snapshotFromInventory(e, inventory, time.Since(start))
+	} else {
+		state := stateForError(ctx, err, result.Stderr)
+		if state == StateAuthenticationNeeded || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return Snapshot{EndpointID: e.Key(), State: state, Latency: time.Since(start), Error: "endpoint query failed"}
+		}
 	}
-	sessions, err := ParseSessions(e.ID, result.Stdout)
+	name, args, err = QueryArgs(e)
 	if err != nil {
-		return Snapshot{EndpointID: e.ID, State: StateIncompatible, Latency: time.Since(start), Error: err.Error()}
+		return Snapshot{EndpointID: e.Key(), State: StateIncompatible, Error: err.Error()}
 	}
-	return Snapshot{EndpointID: e.ID, State: StateOnline, Sessions: sessions, LastSuccess: time.Now().UTC(), Latency: time.Since(start)}
+	result, err = c.exec.Output(ctx, name, args...)
+	if err != nil {
+		return Snapshot{EndpointID: e.Key(), State: stateForError(ctx, err, result.Stderr), Latency: time.Since(start), Error: "endpoint query failed"}
+	}
+	sessions, err := ParseSessions(e.Key(), result.Stdout)
+	if err != nil {
+		return Snapshot{EndpointID: e.Key(), State: StateIncompatible, Latency: time.Since(start), Error: err.Error()}
+	}
+	return Snapshot{EndpointID: e.Key(), State: StateOnline, Sessions: sessions, LastSuccess: time.Now().UTC(), Latency: time.Since(start)}
+}
+
+func snapshotFromInventory(endpoint Endpoint, inventory Inventory, latency time.Duration) Snapshot {
+	sessions := make([]Session, 0, len(inventory.Sessions))
+	for _, session := range inventory.Sessions {
+		sessions = append(sessions, Session{
+			SessionKey: SessionKey{EndpointID: endpoint.Key(), SessionName: session.Name},
+			Running:    session.Running,
+			Default:    session.Default,
+		})
+	}
+	return Snapshot{
+		EndpointID:  endpoint.Key(),
+		State:       StateOnline,
+		Host:        inventory.Host,
+		Workspaces:  append([]WorkspaceSummary(nil), inventory.Workspaces...),
+		Sessions:    sessions,
+		Hosts:       append([]Endpoint(nil), inventory.Hosts...),
+		LastSuccess: time.Now().UTC(),
+		Latency:     latency,
+	}
 }
 func ParseSessions(endpointID string, b []byte) ([]Session, error) {
 	var v struct {
@@ -622,8 +769,11 @@ func RefreshWithTimeout(ctx context.Context, client *Client, endpoints []Endpoin
 				snapshot := client.Query(endpointCtx, job.endpoint)
 				cancel()
 				if snapshot.State != StateOnline {
-					if old, ok := prior[job.endpoint.ID]; ok && len(old.Sessions) > 0 {
+					if old, ok := prior[job.endpoint.Key()]; ok && (len(old.Sessions) > 0 || len(old.Workspaces) > 0 || len(old.Hosts) > 0) {
+						snapshot.Host = old.Host
+						snapshot.Workspaces = old.Workspaces
 						snapshot.Sessions = old.Sessions
+						snapshot.Hosts = old.Hosts
 						snapshot.LastSuccess = old.LastSuccess
 						snapshot.State = StateStale
 					}
