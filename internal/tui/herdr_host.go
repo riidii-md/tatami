@@ -56,7 +56,13 @@ func (v *HerdrHostView) View() string {
 		b.WriteString(errorStyle.Render(v.err.Error()))
 		b.WriteString("\n")
 	}
-	b.WriteString(mutedStyle.Render("Auth: OpenSSH config / ssh-agent.\nSpecific key: use an alias with IdentityFile."))
+	b.WriteString(mutedStyle.Render("Tatami stores no SSH credentials. Passwordless SSH required."))
+	if endpoint := v.Endpoint(); herdrhub.ValidateEndpoint(endpoint) == nil {
+		b.WriteString("\n")
+		b.WriteString(mutedStyle.Render("First setup: ssh-copy-id " + endpoint.Target))
+	}
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render("Specific key: use an OpenSSH alias with IdentityFile / ssh-agent."))
 	b.WriteString("\n\n")
 	b.WriteString(helpStyle.Render("[tab]next  [enter]save & test  [esc]cancel"))
 	return renderPanel(b.String(), v.mobileMode)

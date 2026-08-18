@@ -304,6 +304,31 @@ func hubEndpointStatus(snapshot herdrhub.Snapshot) string {
 	return status
 }
 
+func hubAuthenticationGuidance(endpoint *herdrhub.Endpoint, snapshot herdrhub.Snapshot) string {
+	if endpoint == nil || snapshot.State != herdrhub.StateAuthenticationNeeded {
+		return ""
+	}
+	if err := herdrhub.ValidateEndpoint(*endpoint); err != nil {
+		return "SSH authentication required. Edit this host and enter a valid destination."
+	}
+	return "Passwordless SSH required\n" +
+		"Run in another terminal: ssh-copy-id " + endpoint.Target + "\n" +
+		"Complete the password prompt, then [r] retry."
+}
+
+func (l *ListView) herdrEndpointGuidanceView() string {
+	selected := l.Selected()
+	if selected == nil || selected.Type != "herdr_endpoint" || selected.Endpoint == nil {
+		return ""
+	}
+	for _, snapshot := range l.hubSnapshots {
+		if snapshot.EndpointID == selected.Endpoint.ID {
+			return hubAuthenticationGuidance(selected.Endpoint, snapshot)
+		}
+	}
+	return ""
+}
+
 func (l *ListView) ToggleHerdrEndpoint(id string) {
 	if id == "" {
 		return
@@ -703,6 +728,11 @@ func (l *ListView) View() string {
 	if usage := l.herdrUsageView(); usage != "" {
 		b.WriteString("\n")
 		b.WriteString(usage)
+		b.WriteString("\n")
+	}
+	if guidance := l.herdrEndpointGuidanceView(); guidance != "" {
+		b.WriteString("\n")
+		b.WriteString(errorStyle.Render(guidance))
 		b.WriteString("\n")
 	}
 

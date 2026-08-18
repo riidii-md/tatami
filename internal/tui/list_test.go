@@ -42,6 +42,34 @@ func TestHubEndpointStatusShowsLatencyAndLastSuccessAge(t *testing.T) {
 	}
 }
 
+func TestHubAuthenticationNeededShowsPasswordlessSSHSetup(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "local", Path: t.TempDir()})
+	view := NewListViewWithHerdrSessions(store, func() ([]shell.HerdrSession, error) { return nil, nil })
+	endpoint := herdrhub.Endpoint{ID: "macmini", Label: "Mac Mini", Target: "oles@bmo.local"}
+	view.SetHerdrHubSnapshots([]herdrhub.Endpoint{endpoint}, []herdrhub.Snapshot{{EndpointID: endpoint.ID, State: herdrhub.StateAuthenticationNeeded}})
+	view.SetSize(100, 40)
+
+	for i, item := range view.items {
+		if item.Type == "herdr_endpoint" && item.Endpoint != nil && item.Endpoint.ID == endpoint.ID {
+			view.cursor = i
+		}
+	}
+	got := view.View()
+	for _, want := range []string{"Passwordless SSH required", "ssh-copy-id oles@bmo.local", "then [r] retry"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("authentication guidance missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestHubAuthenticationGuidanceDoesNotEchoUnsafeTarget(t *testing.T) {
+	endpoint := &herdrhub.Endpoint{ID: "macmini", Label: "Mac Mini", Target: "host\nunsafe"}
+	got := hubAuthenticationGuidance(endpoint, herdrhub.Snapshot{State: herdrhub.StateAuthenticationNeeded})
+	if strings.Contains(got, endpoint.Target) || strings.Contains(got, "ssh-copy-id") {
+		t.Fatalf("unsafe target exposed in authentication command: %q", got)
+	}
+}
+
 func TestHubFilterIncludesLocalAndRemoteSessions(t *testing.T) {
 	store := newTestStore(t, &workspace.Workspace{Name: "local", Path: t.TempDir()})
 	view := NewListViewWithHerdrSessions(store, func() ([]shell.HerdrSession, error) { return []shell.HerdrSession{{Name: "local-match"}}, nil })
