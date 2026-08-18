@@ -56,10 +56,16 @@ func (v *HerdrHostView) View() string {
 		b.WriteString(errorStyle.Render(v.err.Error()))
 		b.WriteString("\n")
 	}
-	b.WriteString(mutedStyle.Render("Tatami stores no SSH credentials. Passwordless SSH required."))
+	b.WriteString(mutedStyle.Render("Tatami stores no SSH credentials. Enter on host: OpenSSH asks for password or key passphrase."))
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render("Background refresh needs non-interactive SSH."))
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render("Encrypted key: ssh-add ~/.ssh/<private-key>"))
 	if endpoint := v.Endpoint(); herdrhub.ValidateEndpoint(endpoint) == nil {
 		b.WriteString("\n")
-		b.WriteString(mutedStyle.Render("First setup: ssh-copy-id " + endpoint.Target))
+		b.WriteString(mutedStyle.Render("Install key: ssh-copy-id " + endpoint.Target))
+		b.WriteString("\n")
+		b.WriteString(mutedStyle.Render("Verify: ssh -o BatchMode=yes " + endpoint.Target + " true"))
 	}
 	b.WriteString("\n")
 	b.WriteString(mutedStyle.Render("Specific key: use an OpenSSH alias with IdentityFile / ssh-agent."))

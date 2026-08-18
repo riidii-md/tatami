@@ -26,18 +26,27 @@ inventory with `ssh -o BatchMode=yes`, so a host requiring a password is shown
 as authentication-needed instead of prompting in the TUI. Interactive
 attachment is delegated to `herdr --remote <target> --session <name>`.
 
-When a selected host shows `authentication-needed`, Tatami displays the
-passwordless-SSH setup command and retry action. For a host that accepts account
-passwords, run the displayed command in another terminal:
+When a selected host shows `authentication-needed`, press `Enter` to open that
+remote Herdr interactively. Herdr delegates authentication to OpenSSH, which can
+prompt for a private-key passphrase or account password; Tatami never receives
+or stores either credential. `Space` separately expands or collapses a host.
+
+Background session inventory remains non-interactive. For that refresh to work,
+load an encrypted private key into `ssh-agent`:
+
+```sh
+ssh-add ~/.ssh/private-key
+```
+
+For a host that does not have the public key yet, install it once:
 
 ```sh
 ssh-copy-id user@host
 ```
 
-Complete the password prompt, verify `ssh user@host` no longer needs a password,
-then press `r` in Tatami. If the remote already authorizes a different key, use
-an SSH-config alias with `IdentityFile` instead. Tatami stores neither account
-passwords nor private keys.
+Complete the password prompt, verify `ssh -o BatchMode=yes user@host true`
+returns silently, then press `r` in Tatami. If the remote authorizes a different
+key, use an SSH-config alias with `IdentityFile` instead.
 
 The private inventory cache lives at `$XDG_STATE_HOME/tatami/herdr-hub.json`
 with mode `0600`. It contains only endpoint state and session inventory, never

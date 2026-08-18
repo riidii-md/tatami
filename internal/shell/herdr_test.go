@@ -22,6 +22,24 @@ func TestHerdrCommandOutputPreservesStructuredStderr(t *testing.T) {
 	}
 }
 
+func TestHerdrInteractiveCommandsIncludeRemoteAttach(t *testing.T) {
+	tests := []struct {
+		args []string
+		want bool
+	}{
+		{args: []string{"--session", "local"}, want: true},
+		{args: []string{"--remote", "workbox"}, want: true},
+		{args: []string{"--remote", "workbox", "--session", "agents"}, want: true},
+		{args: []string{"--session", "local", "agent", "list"}, want: false},
+		{args: []string{"session", "list", "--json"}, want: false},
+	}
+	for _, test := range tests {
+		if got := herdrCommandIsInteractive(test.args); got != test.want {
+			t.Errorf("herdrCommandIsInteractive(%q) = %t; want %t", test.args, got, test.want)
+		}
+	}
+}
+
 func TestHerdrRunWithLayoutStartsSessionCreatesWorkspaceAndAttaches(t *testing.T) {
 	var commands []recordedHerdrCommand
 	running := false
@@ -136,6 +154,31 @@ func TestHerdrAttachRemoteSessionUsesExactArguments(t *testing.T) {
 	want := []string{"--remote", "workbox", "--session", "same-name"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("arguments = %#v, want %#v", got, want)
+	}
+}
+
+func TestHerdrAttachRemoteUsesExactTargetArgument(t *testing.T) {
+	var got []string
+	runner := NewHerdrRunnerWithExecutor(func(args ...string) ([]byte, error) {
+		got = append([]string(nil), args...)
+		return nil, nil
+	})
+	if err := runner.AttachRemote("oles@bmo.local"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--remote", "oles@bmo.local"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("arguments = %#v, want %#v", got, want)
+	}
+}
+
+func TestHerdrAttachRemoteRejectsEmptyTarget(t *testing.T) {
+	runner := NewHerdrRunnerWithExecutor(func(args ...string) ([]byte, error) {
+		t.Fatalf("executor called with %q", args)
+		return nil, nil
+	})
+	if err := runner.AttachRemote("  "); err == nil || !strings.Contains(err.Error(), "target is required") {
+		t.Fatalf("empty target error = %v", err)
 	}
 }
 

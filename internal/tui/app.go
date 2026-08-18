@@ -605,6 +605,14 @@ func (a *App) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch item.Type {
 		case "herdr_endpoint":
 			if item.Endpoint != nil {
+				if item.Endpoint.ID != herdrhub.LocalEndpointID {
+					a.result = &Result{
+						Action:          ActionAttachHerdrEndpoint,
+						HerdrEndpointID: item.Endpoint.ID,
+						HerdrTarget:     item.Endpoint.Target,
+					}
+					return a, tea.Quit
+				}
 				a.listView.ToggleHerdrEndpoint(item.Endpoint.ID)
 			}
 		case "folder":

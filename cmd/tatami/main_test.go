@@ -281,6 +281,17 @@ func TestHandleResultRejectsUnsafeRemoteSession(t *testing.T) {
 	}
 }
 
+func TestHandleResultRejectsUnsafeRemoteEndpointAuthentication(t *testing.T) {
+	err := handleResult(&tui.Result{
+		Action:          tui.ActionAttachHerdrEndpoint,
+		HerdrEndpointID: "work",
+		HerdrTarget:     "host;touch",
+	}, false)
+	if err == nil || !strings.Contains(err.Error(), "SSH destination") {
+		t.Fatalf("unsafe remote endpoint error = %v", err)
+	}
+}
+
 func TestRunCLIPassesFlagsToTrackedAgentWithoutPersistingArguments(t *testing.T) {
 	paths := configureCLIPaths(t)
 	writeFakeAgent(t, "fakeagent", "printf 'agent:%s\\n' \"$*\"\nexit 0\n")

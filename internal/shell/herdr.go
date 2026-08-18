@@ -58,7 +58,7 @@ func NewHerdrRunner() *HerdrRunner {
 	return NewHerdrRunnerWithRuntime(func(args ...string) ([]byte, error) {
 		cmd := exec.Command("herdr", args...)
 		cmd.Stdin = os.Stdin
-		if len(args) == 2 && args[0] == "--session" {
+		if herdrCommandIsInteractive(args) {
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 			return nil, cmd.Run()
@@ -74,6 +74,10 @@ func NewHerdrRunner() *HerdrRunner {
 		}
 		return nil
 	})
+}
+
+func herdrCommandIsInteractive(args []string) bool {
+	return len(args) >= 2 && (args[0] == "--remote" || len(args) == 2 && args[0] == "--session")
 }
 
 func herdrCommandOutput(cmd *exec.Cmd) ([]byte, error) {
@@ -174,6 +178,16 @@ func (h *HerdrRunner) AttachRemoteSession(target, session string) error {
 		return fmt.Errorf("herdr session name is required")
 	}
 	_, err := h.exec("--remote", target, "--session", session)
+	return err
+}
+
+// AttachRemote opens a remote Herdr interactively. OpenSSH owns any password
+// or private-key passphrase prompt; Tatami never receives those credentials.
+func (h *HerdrRunner) AttachRemote(target string) error {
+	if strings.TrimSpace(target) == "" {
+		return fmt.Errorf("remote Herdr target is required")
+	}
+	_, err := h.exec("--remote", target)
 	return err
 }
 

@@ -654,6 +654,16 @@ func handleResult(result *tui.Result, newTabMode bool) error {
 		args := shell.AttachSessionCmd(result.SessionName)
 		return syscall.Exec(zellijPath, args, os.Environ())
 	}
+	if result.Action == tui.ActionAttachHerdrEndpoint {
+		endpoint := herdrhub.Endpoint{ID: result.HerdrEndpointID, Label: result.HerdrEndpointID, Target: result.HerdrTarget}
+		if err := herdrhub.ValidateEndpoint(endpoint); err != nil {
+			return fmt.Errorf("invalid remote Herdr endpoint: %w", err)
+		}
+		if err := shell.NewHerdrRunner().AttachRemote(endpoint.Target); err != nil {
+			return fmt.Errorf("open Herdr endpoint %q: %w", endpoint.ID, err)
+		}
+		return nil
+	}
 	if result.Action == tui.ActionAttachHerdrSession {
 		if result.SessionName == "" {
 			return fmt.Errorf("no Herdr session selected")

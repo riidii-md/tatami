@@ -10,7 +10,15 @@ import (
 func TestHerdrHostViewExplainsSSHAuthentication(t *testing.T) {
 	view := NewHerdrHostView(herdrhub.Endpoint{ID: "macmini", Label: "Mac Mini", Target: "oles@bmo.local"})
 	got := view.View()
-	for _, want := range []string{"Tatami stores no SSH credentials", "Passwordless SSH required", "ssh-copy-id oles@bmo.local", "IdentityFile"} {
+	for _, want := range []string{
+		"Tatami stores no SSH credentials",
+		"OpenSSH asks for password or key passphrase",
+		"Background refresh needs non-interactive SSH",
+		"ssh-add ~/.ssh/<private-key>",
+		"ssh-copy-id oles@bmo.local",
+		"ssh -o BatchMode=yes oles@bmo.local true",
+		"IdentityFile",
+	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("host form missing %q authentication guidance:\n%s", want, got)
 		}

@@ -55,7 +55,14 @@ func TestHubAuthenticationNeededShowsPasswordlessSSHSetup(t *testing.T) {
 		}
 	}
 	got := view.View()
-	for _, want := range []string{"Passwordless SSH required", "ssh-copy-id oles@bmo.local", "then [r] retry"} {
+	for _, want := range []string{
+		"OpenSSH will ask for password or key passphrase",
+		"Background refresh needs non-interactive SSH",
+		"ssh-add ~/.ssh/<private-key>",
+		"ssh-copy-id oles@bmo.local",
+		"ssh -o BatchMode=yes oles@bmo.local true",
+		"[enter]open/authenticate",
+	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("authentication guidance missing %q:\n%s", want, got)
 		}

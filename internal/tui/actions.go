@@ -20,6 +20,7 @@ const (
 	ActionWorktree
 	ActionAttachSession
 	ActionAttachHerdrSession
+	ActionAttachHerdrEndpoint
 )
 
 // ActionView displays the action menu

@@ -150,6 +150,31 @@ func TestRemoteRefreshKeysUseSelectedAndAllEndpointsAndCancel(t *testing.T) {
 	}
 }
 
+func TestEnterOpensRemoteEndpointForInteractiveAuthentication(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "local", Path: t.TempDir()})
+	remote := herdrhub.Endpoint{ID: "work", Label: "Work", Target: "work"}
+	app := NewApp(store,
+		withoutHerdrSessions(),
+		WithHerdrHubSnapshots([]herdrhub.Endpoint{herdrhub.LocalEndpoint(), remote}, []herdrhub.Snapshot{{EndpointID: remote.ID, State: herdrhub.StateAuthenticationNeeded}}),
+	)
+	for i, item := range app.listView.items {
+		if item.Type == "herdr_endpoint" && item.Endpoint != nil && item.Endpoint.ID == remote.ID {
+			app.listView.cursor = i
+		}
+	}
+
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if app.listView.hubCollapsed[remote.ID] {
+		t.Fatal("enter on remote endpoint collapsed it instead of opening it")
+	}
+	if app.result == nil || app.result.Action != ActionAttachHerdrEndpoint || app.result.HerdrEndpointID != remote.ID || app.result.HerdrTarget != remote.Target {
+		t.Fatalf("interactive authentication result = %#v", app.result)
+	}
+	if cmd == nil {
+		t.Fatal("opening remote endpoint did not quit the chooser")
+	}
+}
+
 func TestHealthyEndpointResultDoesNotWaitForSlowEndpoint(t *testing.T) {
 	store := newTestStore(t, &workspace.Workspace{Name: "local", Path: t.TempDir()})
 	slow := herdrhub.Endpoint{ID: "slow", Label: "Slow", Target: "slow"}

@@ -311,9 +311,11 @@ func hubAuthenticationGuidance(endpoint *herdrhub.Endpoint, snapshot herdrhub.Sn
 	if err := herdrhub.ValidateEndpoint(*endpoint); err != nil {
 		return "SSH authentication required. Edit this host and enter a valid destination."
 	}
-	return "Passwordless SSH required\n" +
-		"Run in another terminal: ssh-copy-id " + endpoint.Target + "\n" +
-		"Complete the password prompt, then [r] retry."
+	return "[enter]open/authenticate — OpenSSH will ask for password or key passphrase\n" +
+		"Background refresh needs non-interactive SSH\n" +
+		"Encrypted key: ssh-add ~/.ssh/<private-key>\n" +
+		"Install key: ssh-copy-id " + endpoint.Target + "\n" +
+		"Verify refresh: ssh -o BatchMode=yes " + endpoint.Target + " true"
 }
 
 func (l *ListView) herdrEndpointGuidanceView() string {
@@ -746,6 +748,7 @@ func (l *ListView) View() string {
 		if selected := l.Selected(); selected != nil && selected.Type == "herdr_endpoint" && selected.Endpoint != nil {
 			help = "[↑↓/1-9]select  [enter/space]collapse  [r]refresh"
 			if selected.Endpoint.ID != herdrhub.LocalEndpointID {
+				help = "[↑↓/1-9]select  [enter]open  [space]collapse  [r]refresh"
 				help += "\n[e]edit [d]remove [a]add [/]filter [q]uit"
 			} else {
 				help += "\n[a]add [/]filter [q]uit"
@@ -770,6 +773,7 @@ func (l *ListView) View() string {
 	} else if selected := l.Selected(); selected != nil && selected.Type == "herdr_endpoint" && selected.Endpoint != nil {
 		help = "[enter/space]collapse  [r]refresh  [R]refresh all  [a]add"
 		if selected.Endpoint.ID != herdrhub.LocalEndpointID {
+			help = "[enter]open/authenticate  [space]collapse  [r]refresh  [R]refresh all  [a]add"
 			help += "  [e]edit  [d]remove"
 		}
 		help += "  [/]filter  [q]uit"
