@@ -145,6 +145,20 @@ func TestExactQueryAndAttachArgs(t *testing.T) {
 		t.Fatalf("interactive query %s %#v %v", n, a, err)
 	}
 }
+
+func TestIndirectAttachArgsUseProxyJumpWithoutForwardingAgent(t *testing.T) {
+	endpoint := Endpoint{ID: "macmini", NodeID: "bastion/macmini", Label: "Mac Mini", Target: "macmini", Via: []string{"user@bastion"}}
+	name, args, err := AttachArgs(endpoint, "agents")
+	want := []string{"-J", "user@bastion", "-t", "--", "macmini", "herdr", "--session", "agents"}
+	if err != nil || name != "ssh" || !reflect.DeepEqual(args, want) {
+		t.Fatalf("indirect attach = %s %#v err=%v; want ssh %#v", name, args, err, want)
+	}
+	for _, arg := range args {
+		if arg == "-A" || strings.Contains(arg, "ForwardAgent") {
+			t.Fatalf("attach enabled agent forwarding: %#v", args)
+		}
+	}
+}
 func TestParseAgentsAllowsOnlySafeFields(t *testing.T) {
 	agents, err := ParseAgents([]byte(`{"result":{"agents":[{"agent":"codex","agent_status":"working","cwd":"/safe","pane_id":"p","terminal":"SECRET"}]}}`))
 	if err != nil || !reflect.DeepEqual(agents, []Agent{{Kind: "codex", Status: "working", CWD: "/safe"}}) {
@@ -158,6 +172,32 @@ type fakeExec struct {
 	out    []byte
 	err    error
 	stderr []byte
+}
+
+type queuedExec struct {
+	calls []struct {
+		name string
+		args []string
+	}
+	results []ExecResult
+	errors  []error
+}
+
+func (f *queuedExec) Output(_ context.Context, name string, args ...string) (ExecResult, error) {
+	f.calls = append(f.calls, struct {
+		name string
+		args []string
+	}{name: name, args: append([]string(nil), args...)})
+	index := len(f.calls) - 1
+	var result ExecResult
+	var err error
+	if index < len(f.results) {
+		result = f.results[index]
+	}
+	if index < len(f.errors) {
+		err = f.errors[index]
+	}
+	return result, err
 }
 
 func (f *fakeExec) Output(_ context.Context, n string, a ...string) (ExecResult, error) {
@@ -179,14 +219,25 @@ type fakeInteractiveExec struct {
 	args          []string
 	out           []byte
 	err           error
+	calls         int
 }
 
 func (f *fakeInteractiveExec) OutputInteractive(_ context.Context, stdin io.Reader, stderr io.Writer, name string, args ...string) (ExecResult, error) {
+	f.calls++
 	f.stdin = stdin
 	f.stderr = stderr
 	f.name = name
 	f.args = append([]string(nil), args...)
 	return ExecResult{Stdout: f.out}, f.err
+}
+
+func TestInteractiveInventoryRejectsMalformedSuccessWithoutSecondConnection(t *testing.T) {
+	f := &fakeInteractiveExec{out: []byte("not an inventory")}
+	client := NewClientWithExecutors(&fakeExec{}, f)
+	_, err := client.QueryInventoryInteractive(context.Background(), Endpoint{ID: "remote", Label: "Remote", Target: "remote"}, strings.NewReader(""), io.Discard)
+	if err == nil || f.calls != 1 {
+		t.Fatalf("malformed interactive inventory error=%v calls=%d", err, f.calls)
+	}
 }
 
 func TestClientInteractiveQueryUsesTerminalIOAndParsesNamedSessions(t *testing.T) {
@@ -214,6 +265,64 @@ func TestClientInteractiveQueryUsesTerminalIOAndParsesNamedSessions(t *testing.T
 	}
 }
 
+func TestClientQueriesFullFederatedInventory(t *testing.T) {
+	f := &queuedExec{results: []ExecResult{{Stdout: []byte(`{"kind":"tatami.hub.inventory","version":1,"host":"bastion","workspaces":[{"name":"API","path":"/srv/api","quick_access":true}],"sessions":[{"name":"agents","running":true}],"hosts":[{"id":"macmini","label":"Mac Mini","target":"macmini"}]}`)}}}
+	endpoint := Endpoint{ID: "bastion", Label: "Bastion", Target: "bastion"}
+	snapshot := NewClient(f).Query(context.Background(), endpoint)
+	if snapshot.State != StateOnline || snapshot.Host != "bastion" || len(snapshot.Workspaces) != 1 || len(snapshot.Sessions) != 1 || len(snapshot.Hosts) != 1 {
+		t.Fatalf("federated snapshot = %#v", snapshot)
+	}
+	if snapshot.Sessions[0].EndpointID != "bastion" {
+		t.Fatalf("session identity = %#v", snapshot.Sessions[0])
+	}
+	want := []string{"-o", "BatchMode=yes", "--", "bastion", "tatami", "hub", "inventory", "--json"}
+	if len(f.calls) != 1 || f.calls[0].name != "ssh" || !reflect.DeepEqual(f.calls[0].args, want) {
+		t.Fatalf("inventory calls = %#v", f.calls)
+	}
+}
+
+func TestClientFallsBackToHerdrOnlyInventory(t *testing.T) {
+	f := &queuedExec{
+		results: []ExecResult{{Stderr: []byte("tatami: command not found")}, {Stdout: []byte(`{"sessions":[{"name":"agents","running":true}]}`)}},
+		errors:  []error{errors.New("exit status 127"), nil},
+	}
+	snapshot := NewClient(f).Query(context.Background(), Endpoint{ID: "old", Label: "Old Host", Target: "old"})
+	if snapshot.State != StateOnline || len(snapshot.Sessions) != 1 || len(snapshot.Workspaces) != 0 || len(snapshot.Hosts) != 0 {
+		t.Fatalf("fallback snapshot = %#v", snapshot)
+	}
+	if len(f.calls) != 2 || !reflect.DeepEqual(f.calls[1].args, []string{"-o", "BatchMode=yes", "--", "old", "herdr", "session", "list", "--json"}) {
+		t.Fatalf("fallback calls = %#v", f.calls)
+	}
+}
+
+func TestClientRejectsSuccessfulMalformedInventoryWithoutFallback(t *testing.T) {
+	f := &queuedExec{results: []ExecResult{{Stdout: []byte("not a Tatami inventory")}}}
+	snapshot := NewClient(f).Query(context.Background(), Endpoint{ID: "remote", Label: "Remote", Target: "remote"})
+	if snapshot.State != StateIncompatible || len(f.calls) != 1 {
+		t.Fatalf("malformed inventory snapshot=%#v calls=%#v", snapshot, f.calls)
+	}
+}
+
+func TestClientInteractiveFederationUsesJumpRoute(t *testing.T) {
+	stdin := strings.NewReader("terminal authentication")
+	stderr := io.Discard
+	f := &fakeInteractiveExec{out: []byte(`{"kind":"tatami.hub.inventory","version":1,"host":"macmini","sessions":[{"name":"agents","running":true}]}`)}
+	client := NewClientWithExecutors(&fakeExec{}, f)
+	endpoint := Endpoint{ID: "macmini", NodeID: "bastion/macmini", Label: "Mac Mini", Target: "macmini", Via: []string{"bastion"}}
+
+	snapshot, err := client.QueryInventoryInteractive(context.Background(), endpoint, stdin, stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.EndpointID != "bastion/macmini" || snapshot.Host != "macmini" || len(snapshot.Sessions) != 1 {
+		t.Fatalf("interactive snapshot = %#v", snapshot)
+	}
+	want := []string{"-J", "bastion", "--", "macmini", "tatami", "hub", "inventory", "--json"}
+	if f.name != "ssh" || !reflect.DeepEqual(f.args, want) || f.stdin != stdin || f.stderr != stderr {
+		t.Fatalf("interactive command = %s %#v", f.name, f.args)
+	}
+}
+
 func TestClientEndpointLocalErrors(t *testing.T) {
 	f := &fakeExec{err: errors.New("exit status 255"), stderr: []byte("Permission denied (publickey)")}
 	s := NewClient(f).Query(context.Background(), Endpoint{ID: "work", Label: "Work", Target: "work"})
@@ -223,7 +332,11 @@ func TestClientEndpointLocalErrors(t *testing.T) {
 }
 func TestClientOnlineInvalidJSONAndTimeoutStates(t *testing.T) {
 	endpoint := Endpoint{ID: "work", Label: "Work", Target: "work"}
-	online := NewClient(&fakeExec{out: []byte(`{"sessions":[{"name":"same","running":true}]}`)}).Query(context.Background(), endpoint)
+	onlineExec := &queuedExec{
+		results: []ExecResult{{Stderr: []byte("tatami: command not found")}, {Stdout: []byte(`{"sessions":[{"name":"same","running":true}]}`)}},
+		errors:  []error{errors.New("exit status 127"), nil},
+	}
+	online := NewClient(onlineExec).Query(context.Background(), endpoint)
 	if online.State != StateOnline || len(online.Sessions) != 1 || online.Sessions[0].EndpointID != "work" {
 		t.Fatalf("online snapshot = %#v", online)
 	}

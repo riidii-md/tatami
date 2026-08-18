@@ -1,17 +1,17 @@
-# Herdr Hub
+# Federated Tatami Hub
 
-Tatami's Herdr Hub is a personal, federated session inventory. The local
-machine is always present. Add remote machines in `~/.config/tatami/herdr-hosts.json`:
+Tatami's hub is a personal, federated navigator for workspaces and Herdr
+sessions. The local machine is always present. Add a remote machine from the
+home screen with `a`, or edit `~/.config/tatami/herdr-hosts.json`:
 
 ```json
 {"hosts":[{"id":"workbox","label":"Workbox","target":"workbox"}]}
 ```
 
-`target` can be an SSH-config alias, hostname, IP address, or a direct
-`user@host` destination such as `oles@bmo.local`. Herdr's
-`ssh://user@host:port` form is also supported. It is never treated as a host
-command. Direct destinations use normal OpenSSH keys and `ssh-agent`. For a
-specific key, define an alias in `~/.ssh/config`:
+`target` can be an SSH-config alias, hostname, IP address, a `user@host`
+destination, or Herdr's `ssh://user@host:port` form. It is always passed as an
+argument and is never treated as a shell command. For a specific key, define an
+alias in `~/.ssh/config`:
 
 ```sshconfig
 Host macmini
@@ -21,49 +21,90 @@ Host macmini
   IdentitiesOnly yes
 ```
 
-Then use `macmini` as the Tatami destination. Tatami performs background
-inventory with `ssh -o BatchMode=yes`, so a host requiring a password is shown
-as authentication-needed instead of prompting in the TUI. Interactive
-attachment is delegated to `herdr --remote <target> --session <name>`.
+Then use `macmini` as the Tatami destination. Tatami stores no SSH passwords,
+key passphrases, or private-key material.
 
-When a selected host shows `authentication-needed`, press `Enter` to open that
-remote Herdr interactively. Herdr delegates authentication to OpenSSH, which can
-prompt for a private-key passphrase or account password; Tatami never receives
-or stores either credential. `Space` separately expands or collapses a host.
+## What a remote machine exposes
 
-Background session inventory remains non-interactive. For that refresh to work,
-load an encrypted private key into `ssh-agent`:
+A current Tatami installation answers the versioned, read-only command:
+
+```sh
+tatami hub inventory --json
+```
+
+After discovery, the remote machine remains inside the normal home screen and
+shows its:
+
+- Quick Access workspaces
+- Tatami projects and folders
+- named Herdr sessions
+- saved downstream Tatami hosts
+
+The inventory contains only the display and connection metadata required to
+navigate. It excludes SSH key paths, layout commands, agent command arguments,
+pane contents, prompts, terminal frames, and credentials. An older remote
+without the inventory command falls back to a Herdr-session-only view.
+
+## Authentication and refresh
+
+Background discovery uses `ssh -o BatchMode=yes`, so it never takes over the
+TUI with a password prompt. A host that needs authentication is marked
+`authentication-needed`. Highlight it and press `Enter`; OpenSSH then owns the
+terminal and may ask for an account password or encrypted-key passphrase. When
+the command completes, Tatami stays on its main screen and expands the newly
+discovered content.
+
+Passwords work for interactive discovery and opening. For automatic background
+refresh, configure non-interactive SSH. Load an encrypted key into your agent:
 
 ```sh
 ssh-add ~/.ssh/private-key
 ```
 
-For a host that does not have the public key yet, install it once:
+Or install the public key once:
 
 ```sh
 ssh-copy-id user@host
+ssh -o BatchMode=yes user@host true
 ```
 
-Complete the password prompt, verify `ssh -o BatchMode=yes user@host true`
-returns silently, then press `r` in Tatami. If the remote authorizes a different
-key, use an SSH-config alias with `IdentityFile` instead.
+For a downstream host, Tatami shows the equivalent `ProxyJump` form in the
+on-screen authentication help.
 
-The private inventory cache lives at `$XDG_STATE_HOME/tatami/herdr-hub.json`
-with mode `0600`. It contains only endpoint state and session inventory, never
-credentials, SSH keys, command arguments, pane contents, prompts, or terminal
-frames. Cached data may be shown as stale while a host is unreachable.
+## Bastions and downstream hosts
 
-Remote stop, delete, creation, workspace/layout creation, live previews,
-notifications, and metrics probes are deliberately deferred. Remote CPU and
-RAM are unavailable until Herdr defines a compatible read-only metrics
-capability.
+Discovery is lazy. Tatami contacts only hosts you have explicitly opened; it
+does not automatically authenticate to every machine found on a remote. If a
+laptop knows `bastion`, and the Tatami installation on `bastion` knows
+`macmini`, opening `bastion` reveals `macmini` as a child. Opening that child
+uses local OpenSSH ProxyJump:
 
-Tatami renders cached inventory first, then refreshes endpoints independently
-in the background. Use `r` to refresh the selected endpoint (or all endpoints
-when no endpoint is selected), and `R` to refresh all. `Space` collapses an
-endpoint; `a`, `e`, and `d` add, edit, and remove a selected remote host. Saving
-a host performs the same asynchronous non-interactive inventory test. Remote
-rows are attach-only: `Enter` selects the exact endpoint/session pair and does
-not expose local stop or delete actions. Entering a stopped named session lets
-Herdr use its normal restore path. For safe non-interactive SSH inventory,
-remote session names must use letters, numbers, `.`, `_`, or `-`.
+```sh
+ssh -J bastion macmini
+```
+
+Longer saved chains work the same way, up to four SSH hops. Tatami detects
+repeated host IDs or targets as cycles. All hop credentials remain on the
+machine running the visible Tatami process: Tatami never enables `ssh -A` or
+`ForwardAgent`. Remote Herdr sessions, workspaces, and new panes/tabs all
+preserve the selected route. Federated inventory intentionally omits layout
+commands, so a discovered workspace opens without executing remote-supplied
+layout automation.
+
+## Controls and cache
+
+- `Enter` expands an online host, authenticates/discovers an unavailable host,
+  or opens the selected workspace/session.
+- `Space` collapses or expands a host without connecting.
+- `r` refreshes the selected host, including a discovered downstream host.
+- `R` refreshes saved top-level hosts.
+- `/` filters local and discovered workspaces, sessions, and host labels.
+- `a`, `e`, and `d` manage top-level saved hosts. Downstream hosts are managed
+  on the Tatami installation that owns them.
+
+The private inventory cache lives at
+`$XDG_STATE_HOME/tatami/herdr-hub.json` with mode `0600`. Cached successful data
+may remain visible as stale while a host is unreachable. Remote rows are
+navigation-only; destructive session and workspace operations remain local.
+Remote CPU and RAM are unavailable until Herdr defines a compatible read-only
+metrics capability.

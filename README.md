@@ -184,6 +184,12 @@ Connect to remote servers via SSH. Opens an SSH session directly to the remote h
 
 No extra dependencies required - uses standard SSH.
 
+Tatami can also federate the entire home view across saved hosts. A remote with
+a current Tatami installation exposes its Quick Access entries, projects,
+Herdr sessions, and saved downstream hosts. Downstream selections use OpenSSH
+ProxyJump, so a laptop can navigate through a bastion to another machine
+without forwarding its SSH agent. See [Federated Tatami Hub](docs/herdr-hub.md).
+
 ### Git Worktrees
 Open worktrees in new tabs for git-enabled workspaces. When selecting a workspace that is a git repository:
 
@@ -366,6 +372,7 @@ Workspaces are stored in `~/.config/tatami/workspaces.json`:
 | `remote.host` | Remote host (e.g., `user@server.com`) |
 | `remote.key` | SSH key path (e.g., `~/.ssh/my_key`) |
 | `remote.path` | Path on remote server |
+| `remote.jump` | Optional ordered OpenSSH ProxyJump route |
 
 ### Layout Fields
 

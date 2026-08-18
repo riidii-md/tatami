@@ -15,6 +15,7 @@ import (
 	"github.com/OleksandrBesan/tatami/internal/config"
 	"github.com/OleksandrBesan/tatami/internal/git"
 	"github.com/OleksandrBesan/tatami/internal/herdrhub"
+	"github.com/OleksandrBesan/tatami/internal/shell"
 	"github.com/OleksandrBesan/tatami/internal/systemusage"
 	"github.com/OleksandrBesan/tatami/internal/tui"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
@@ -76,6 +77,30 @@ func TestNewTabProcessStartsRemoteSession(t *testing.T) {
 	}
 	if !reflect.DeepEqual(process.args, wantArgs) {
 		t.Fatalf("process args = %#v; want %#v", process.args, wantArgs)
+	}
+}
+
+func TestNewTabProcessStartsRemoteSessionThroughJumpRoute(t *testing.T) {
+	ws := &workspace.Workspace{
+		Name: "server",
+		Remote: &workspace.Remote{
+			Host: "macmini.internal",
+			Jump: []string{"user@bastion", "relay"},
+			Path: "/srv/project",
+		},
+	}
+	process, err := newTabProcess(ws, "/bin/sh", func(string) (string, error) { return "/usr/bin/ssh", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"/usr/bin/ssh",
+		"-J", "user@bastion,relay",
+		"-t", "--", "macmini.internal",
+		"cd '/srv/project' && exec ${SHELL:-/bin/sh}",
+	}
+	if !reflect.DeepEqual(process.args, want) {
+		t.Fatalf("jump process args = %#v; want %#v", process.args, want)
 	}
 }
 
@@ -292,6 +317,33 @@ func TestHandleResultRejectsUnsafeRemoteEndpointAuthentication(t *testing.T) {
 	}
 }
 
+func TestHandleResultAttachesHerdrSessionThroughValidatedJumpRoute(t *testing.T) {
+	original := runInteractiveCommand
+	var gotName string
+	var gotArgs []string
+	runInteractiveCommand = func(name string, args ...string) error {
+		gotName = name
+		gotArgs = append([]string(nil), args...)
+		return nil
+	}
+	t.Cleanup(func() { runInteractiveCommand = original })
+
+	err := handleResult(&tui.Result{
+		Action:          tui.ActionAttachHerdrSession,
+		SessionName:     "agents",
+		HerdrEndpointID: "bastion/macmini",
+		HerdrTarget:     "macmini",
+		HerdrVia:        []string{"user@bastion"},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"-J", "user@bastion", "-t", "--", "macmini", "herdr", "--session", "agents"}
+	if gotName != "ssh" || !reflect.DeepEqual(gotArgs, want) {
+		t.Fatalf("interactive attach = %s %#v; want ssh %#v", gotName, gotArgs, want)
+	}
+}
+
 func TestRunCLIPassesFlagsToTrackedAgentWithoutPersistingArguments(t *testing.T) {
 	paths := configureCLIPaths(t)
 	writeFakeAgent(t, "fakeagent", "printf 'agent:%s\\n' \"$*\"\nexit 0\n")
@@ -394,6 +446,68 @@ func TestRunCLIRejectsMissingRunCommand(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "usage: tatami run <agent> [args...]") {
 		t.Fatalf("stderr = %q", errOut.String())
+	}
+}
+
+func TestRunCLIPrintsVersionedFederationInventory(t *testing.T) {
+	paths := configureCLIPaths(t)
+	store, err := workspace.NewStore(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Create(&workspace.Workspace{Name: "API", Path: "/srv/api", Folder: "work", QuickAccess: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := herdrhub.NewStore(paths.HerdrHostsFile).Save([]herdrhub.Endpoint{{ID: "macmini", Label: "Mac Mini", Target: "macmini"}}); err != nil {
+		t.Fatal(err)
+	}
+	original := listHerdrSessionsForInventory
+	listHerdrSessionsForInventory = func() ([]shell.HerdrSession, error) {
+		return []shell.HerdrSession{{Name: "agents", Running: true}}, nil
+	}
+	t.Cleanup(func() { listHerdrSessionsForInventory = original })
+
+	var out, errOut bytes.Buffer
+	if code := runCLI([]string{"hub", "inventory", "--json"}, &out, &errOut); code != 0 {
+		t.Fatalf("hub inventory code=%d stderr=%q", code, errOut.String())
+	}
+	inventory, err := herdrhub.ParseInventory(out.Bytes())
+	if err != nil {
+		t.Fatalf("parse output %q: %v", out.String(), err)
+	}
+	if len(inventory.Workspaces) != 1 || inventory.Workspaces[0].Name != "API" || len(inventory.Sessions) != 1 || inventory.Sessions[0].Name != "agents" || len(inventory.Hosts) != 1 || inventory.Hosts[0].ID != "macmini" {
+		t.Fatalf("inventory = %#v", inventory)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code := runCLI([]string{"hub", "inventory"}, &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "usage: tatami hub inventory --json") {
+		t.Fatalf("invalid hub command code=%d stderr=%q", code, errOut.String())
+	}
+}
+
+func TestRunCLIInventorySurvivesUnavailableHerdr(t *testing.T) {
+	paths := configureCLIPaths(t)
+	store, err := workspace.NewStore(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Create(&workspace.Workspace{Name: "API", Path: "/srv/api"}); err != nil {
+		t.Fatal(err)
+	}
+	original := listHerdrSessionsForInventory
+	listHerdrSessionsForInventory = func() ([]shell.HerdrSession, error) {
+		return nil, errors.New("Herdr unavailable")
+	}
+	t.Cleanup(func() { listHerdrSessionsForInventory = original })
+
+	var out, errOut bytes.Buffer
+	if code := runCLI([]string{"hub", "inventory", "--json"}, &out, &errOut); code != 0 {
+		t.Fatalf("hub inventory code=%d stderr=%q", code, errOut.String())
+	}
+	inventory, err := herdrhub.ParseInventory(out.Bytes())
+	if err != nil || len(inventory.Workspaces) != 1 || len(inventory.Sessions) != 0 {
+		t.Fatalf("inventory=%#v err=%v", inventory, err)
 	}
 }
 
