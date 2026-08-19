@@ -741,7 +741,14 @@ func handleResult(result *tui.Result, newTabMode bool) error {
 			Target: result.HerdrTarget,
 			Via:    append([]string(nil), result.HerdrVia...),
 		}
-		name, args, err := herdrhub.AttachArgs(endpoint, result.SessionName)
+		var name string
+		var args []string
+		var err error
+		if os.Getenv("HERDR_ENV") == "1" {
+			name, args, err = herdrhub.SSHAttachArgs(endpoint, result.SessionName)
+		} else {
+			name, args, err = herdrhub.AttachArgs(endpoint, result.SessionName)
+		}
 		if err != nil {
 			return fmt.Errorf("invalid remote Herdr endpoint: %w", err)
 		}

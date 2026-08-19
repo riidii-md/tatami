@@ -71,6 +71,13 @@ ssh -o BatchMode=yes user@host true
 For a downstream host, Tatami shows the equivalent `ProxyJump` form in the
 on-screen authentication help.
 
+When Tatami itself is launched from a Herdr-managed pane, opening a remote
+session uses a direct SSH terminal command such as
+`ssh -t host herdr --session coa_bugs`. This preserves the exact highlighted
+session name and avoids asking the local Herdr client to launch a forbidden
+nested client. Outside Herdr, Tatami continues to use Herdr's native remote
+client.
+
 ## Bastions and downstream hosts
 
 Discovery is lazy. Tatami contacts only hosts you have explicitly opened; it

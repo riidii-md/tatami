@@ -531,13 +531,33 @@ func AttachArgs(e Endpoint, session string) (string, []string, error) {
 		return "", nil, err
 	}
 	if len(e.Via) > 0 {
-		return "ssh", []string{
-			"-J", strings.Join(e.Via, ","),
-			"-t", "--", e.Target,
-			"herdr", "--session", session,
-		}, nil
+		return SSHAttachArgs(e, session)
 	}
 	return "herdr", []string{"--remote", e.Target, "--session", session}, nil
+}
+
+// SSHAttachArgs runs the selected named Herdr session on the remote host over
+// a terminal SSH connection. Tatami uses this when its own process is already
+// inside Herdr, where launching the native remote Herdr client is disallowed.
+func SSHAttachArgs(e Endpoint, session string) (string, []string, error) {
+	if strings.TrimSpace(session) == "" {
+		return "", nil, errors.New("Herdr session name is required")
+	}
+	if e.ID == LocalEndpointID || e.Kind == EndpointLocal {
+		return "", nil, errors.New("SSH attach requires a remote Herdr endpoint")
+	}
+	if err := validateRoutedEndpoint(e); err != nil {
+		return "", nil, err
+	}
+	if err := validateRemoteSessionName(session); err != nil {
+		return "", nil, err
+	}
+	args := make([]string, 0, 9)
+	if len(e.Via) > 0 {
+		args = append(args, "-J", strings.Join(e.Via, ","))
+	}
+	args = append(args, "-t", "--", e.Target, "herdr", "--session", session)
+	return "ssh", args, nil
 }
 func AgentArgs(e Endpoint, session string) (string, []string, error) {
 	if strings.TrimSpace(session) == "" {
