@@ -159,6 +159,37 @@ func TestIndirectAttachArgsUseProxyJumpWithoutForwardingAgent(t *testing.T) {
 		}
 	}
 }
+
+func TestSSHAttachArgsUseSelectedSessionForDirectHost(t *testing.T) {
+	name, args, err := SSHAttachArgs(Endpoint{ID: "macmini", Label: "Mac Mini", Target: "oles@bmo.local"}, "coa_bugs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"-t", "--", "oles@bmo.local", "herdr", "--session", "coa_bugs"}
+	if name != "ssh" || !reflect.DeepEqual(args, want) {
+		t.Fatalf("SSH attach = %s %#v; want ssh %#v", name, args, want)
+	}
+}
+
+func TestSSHAttachArgsRejectInvalidLocalAndUnsafeInputs(t *testing.T) {
+	remote := Endpoint{ID: "macmini", Label: "Mac Mini", Target: "oles@bmo.local"}
+	for name, test := range map[string]struct {
+		endpoint Endpoint
+		session  string
+	}{
+		"empty session":  {endpoint: remote},
+		"local endpoint": {endpoint: LocalEndpoint(), session: "agents"},
+		"unsafe target":  {endpoint: Endpoint{ID: "bad", Label: "Bad", Target: "-oProxyCommand=x"}, session: "agents"},
+		"unsafe session": {endpoint: remote, session: "agents;touch"},
+		"route cycle":    {endpoint: Endpoint{ID: "macmini", Label: "Mac Mini", Target: "macmini", Via: []string{"macmini"}}, session: "agents"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := SSHAttachArgs(test.endpoint, test.session); err == nil {
+				t.Fatalf("SSHAttachArgs(%#v, %q) accepted invalid input", test.endpoint, test.session)
+			}
+		})
+	}
+}
 func TestParseAgentsAllowsOnlySafeFields(t *testing.T) {
 	agents, err := ParseAgents([]byte(`{"result":{"agents":[{"agent":"codex","agent_status":"working","cwd":"/safe","pane_id":"p","terminal":"SECRET"}]}}`))
 	if err != nil || !reflect.DeepEqual(agents, []Agent{{Kind: "codex", Status: "working", CWD: "/safe"}}) {

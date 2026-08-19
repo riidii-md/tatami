@@ -344,6 +344,60 @@ func TestHandleResultAttachesHerdrSessionThroughValidatedJumpRoute(t *testing.T)
 	}
 }
 
+func TestHandleResultUsesSSHForSelectedRemoteSessionInsideHerdr(t *testing.T) {
+	t.Setenv("HERDR_ENV", "1")
+	original := runInteractiveCommand
+	var gotName string
+	var gotArgs []string
+	runInteractiveCommand = func(name string, args ...string) error {
+		gotName = name
+		gotArgs = append([]string(nil), args...)
+		return nil
+	}
+	t.Cleanup(func() { runInteractiveCommand = original })
+
+	err := handleResult(&tui.Result{
+		Action:          tui.ActionAttachHerdrSession,
+		SessionName:     "coa_bugs",
+		HerdrEndpointID: "macmini",
+		HerdrTarget:     "oles@bmo.local",
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"-t", "--", "oles@bmo.local", "herdr", "--session", "coa_bugs"}
+	if gotName != "ssh" || !reflect.DeepEqual(gotArgs, want) {
+		t.Fatalf("inside-Herdr attach = %s %#v; want ssh %#v", gotName, gotArgs, want)
+	}
+}
+
+func TestHandleResultKeepsNativeRemoteClientOutsideHerdr(t *testing.T) {
+	t.Setenv("HERDR_ENV", "")
+	original := runInteractiveCommand
+	var gotName string
+	var gotArgs []string
+	runInteractiveCommand = func(name string, args ...string) error {
+		gotName = name
+		gotArgs = append([]string(nil), args...)
+		return nil
+	}
+	t.Cleanup(func() { runInteractiveCommand = original })
+
+	err := handleResult(&tui.Result{
+		Action:          tui.ActionAttachHerdrSession,
+		SessionName:     "coa_bugs",
+		HerdrEndpointID: "macmini",
+		HerdrTarget:     "oles@bmo.local",
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--remote", "oles@bmo.local", "--session", "coa_bugs"}
+	if gotName != "herdr" || !reflect.DeepEqual(gotArgs, want) {
+		t.Fatalf("normal attach = %s %#v; want herdr %#v", gotName, gotArgs, want)
+	}
+}
+
 func TestRunCLIPassesFlagsToTrackedAgentWithoutPersistingArguments(t *testing.T) {
 	paths := configureCLIPaths(t)
 	writeFakeAgent(t, "fakeagent", "printf 'agent:%s\\n' \"$*\"\nexit 0\n")
