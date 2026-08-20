@@ -107,10 +107,12 @@ For compact, phone-friendly navigation over SSH:
 tatami --mobile # or: tatami -m
 ```
 
-Mobile mode shows numbered choices, keeps `Enter` as confirmation, adds `b` as
-a safe Back key outside text fields, hides paths on the home screen, and removes
-decorative menu borders. See [Mobile navigation with Termius](docs/mobile-navigation.md)
-for the recommended Termius shortcut bar and Startup Command.
+Mobile mode uses the full terminal height, enables touch/mouse events, shows
+numbered shortcuts, adds `b` as a safe Back key outside text fields, hides paths
+on the home screen, and removes decorative menu borders. Tap a visible home row
+to open it, tap numbered menu choices to activate them, or use Termius arrow
+gestures. See [Mobile navigation with Termius](docs/mobile-navigation.md) for the
+recommended Termius shortcut bar and Startup Command.
 
 ### Agent session tracking
 

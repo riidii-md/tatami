@@ -7,6 +7,7 @@ import (
 	"github.com/OleksandrBesan/tatami/internal/herdrhub"
 	"github.com/OleksandrBesan/tatami/internal/shell"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestMobileHubRendersEndpointAndRemoteSession(t *testing.T) {
@@ -64,5 +65,21 @@ func TestMobilePanelDropsDecorativeBorder(t *testing.T) {
 	}
 	if !strings.Contains(desktop, "╭") || !strings.Contains(desktop, "╰") {
 		t.Fatalf("desktop panel lost its border: %q", desktop)
+	}
+}
+
+func TestCompactRemoteUsageFitsNarrowScreen(t *testing.T) {
+	session := &shell.HerdrSession{Name: "remote", Running: true}
+	endpoint := &herdrhub.Endpoint{ID: "mac", Label: "Mac", Target: "mac"}
+	view := &ListView{
+		items:      []ListItem{{Type: "herdr_session", Herdr: session, Endpoint: endpoint}},
+		width:      24,
+		mobileMode: true,
+	}
+
+	for _, line := range strings.Split(view.herdrUsageView(), "\n") {
+		if got := lipgloss.Width(line); got > 22 {
+			t.Fatalf("compact usage line width = %d; want at most 22 columns: %q", got, line)
+		}
 	}
 }

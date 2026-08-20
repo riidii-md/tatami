@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +20,64 @@ import (
 	"github.com/OleksandrBesan/tatami/internal/workspace"
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+func TestWindowResizeRequestsFullScreenRepaint(t *testing.T) {
+	app := NewApp(newTestStore(t, &workspace.Workspace{Name: "project", Path: t.TempDir()}))
+
+	if _, cmd := app.Update(tea.WindowSizeMsg{Width: 76, Height: 40}); cmd != nil {
+		t.Fatal("initial window size unexpectedly requested a second repaint")
+	}
+	if _, cmd := app.Update(tea.WindowSizeMsg{Width: 145, Height: 59}); cmd == nil {
+		t.Fatal("window growth did not request a full-screen repaint")
+	}
+	if _, cmd := app.Update(tea.WindowSizeMsg{Width: 145, Height: 59}); cmd != nil {
+		t.Fatal("unchanged window size unexpectedly requested a full-screen repaint")
+	}
+	if _, cmd := app.Update(tea.WindowSizeMsg{Width: 76, Height: 40}); cmd == nil {
+		t.Fatal("window shrink did not request a full-screen repaint")
+	}
+}
+
+func TestMobileMouseTapOpensExactHomeRowAndAction(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "project-01", Path: t.TempDir()})
+	for i := 2; i <= 12; i++ {
+		name := fmt.Sprintf("project-%02d", i)
+		if err := store.Create(&workspace.Workspace{Name: name, Path: t.TempDir()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	app := NewApp(store, WithMobileMode(), WithHerdrSessionLister(nil))
+	app.Update(tea.WindowSizeMsg{Width: 76, Height: 40})
+
+	homeRow := renderedRowContaining(t, app.View(), "project-12")
+	model, _ := app.Update(tea.MouseMsg{X: 8, Y: homeRow, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	app = model.(*App)
+	if app.currentView != ViewActions || app.actionsView == nil || app.actionsView.Workspace().Name != "project-12" {
+		t.Fatalf("tap opened view=%v workspace=%v; want actions for project-12", app.currentView, app.actionsView)
+	}
+
+	actionRow := renderedRowContaining(t, app.View(), "cd here")
+	model, _ = app.Update(tea.MouseMsg{X: 8, Y: actionRow, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	app = model.(*App)
+	if app.result == nil || app.result.Action != ActionCD || app.result.Workspace == nil || app.result.Workspace.Name != "project-12" {
+		t.Fatalf("action tap result = %#v; want cd for project-12", app.result)
+	}
+}
+
+func TestMobileMouseWheelNavigatesHomeRows(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "first", Path: t.TempDir()})
+	if err := store.Create(&workspace.Workspace{Name: "second", Path: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp(store, WithMobileMode(), WithHerdrSessionLister(nil))
+	app.Update(tea.WindowSizeMsg{Width: 76, Height: 40})
+
+	model, _ := app.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown})
+	app = model.(*App)
+	if selected := app.listView.Selected(); selected == nil || selected.Name != "second" {
+		t.Fatalf("wheel selected %#v; want second", selected)
+	}
+}
 
 func TestRemoteAgentDetailUsesCompositeSelectionAndFailureKeepsAttachable(t *testing.T) {
 	store := newTestStore(t, &workspace.Workspace{Name: "local", Path: t.TempDir()})
@@ -1185,6 +1244,17 @@ func withoutHerdrSessions() AppOption {
 	return WithHerdrSessionLister(func() ([]shell.HerdrSession, error) {
 		return nil, nil
 	})
+}
+
+func renderedRowContaining(t *testing.T, view, text string) int {
+	t.Helper()
+	for row, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, text) {
+			return row
+		}
+	}
+	t.Fatalf("rendered view does not contain %q:\n%s", text, view)
+	return -1
 }
 
 func newGitRepo(t *testing.T) string {

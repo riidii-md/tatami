@@ -49,6 +49,7 @@ type ListView struct {
 	hubAgents        map[string][]herdrhub.Agent
 	hubAgentErr      map[string]error
 	hubAgentLoading  map[string]bool
+	mouseRows        map[int]int
 }
 
 func hubSessionKey(endpoint, session string) string { return endpoint + "\x00" + session }
@@ -514,10 +515,6 @@ func (l *ListView) visibleRange() (int, int) {
 	if listHeight < 5 {
 		listHeight = 5
 	}
-	if l.mobileMode && listHeight > 9 {
-		listHeight = 9
-	}
-
 	start := 0
 	end := len(l.items)
 	if end > listHeight {
@@ -561,6 +558,23 @@ func (l *ListView) selectVisibleNumber(key string) bool {
 	}
 	l.cursor = selectable[index]
 	return true
+}
+
+func (l *ListView) selectMouseRow(row int) bool {
+	index, ok := l.mouseRows[row]
+	if !ok || index < 0 || index >= len(l.items) || listItemIsHeader(l.items[index]) {
+		return false
+	}
+	l.cursor = index
+	return true
+}
+
+func (l *ListView) recordMouseRow(rendered string, index int) {
+	row := strings.Count(rendered, "\n")
+	if !l.compact() {
+		row++ // desktop rendering has one row of outer vertical padding
+	}
+	l.mouseRows[row] = index
 }
 
 // Selected returns the currently selected item
@@ -714,6 +728,7 @@ func (l *ListView) IsFiltering() bool {
 // View renders the list view
 func (l *ListView) View() string {
 	var b strings.Builder
+	l.mouseRows = make(map[int]int)
 
 	// Title
 	title := "TATAMI"
@@ -784,10 +799,12 @@ func (l *ListView) View() string {
 				if i == l.cursor {
 					style = selectedStyle
 				}
+				l.recordMouseRow(b.String(), i)
 				b.WriteString(style.Render(item.Name))
 				b.WriteString("\n")
 
 			case "folder":
+				l.recordMouseRow(b.String(), i)
 				cursor := choicePrefix(l.mobileMode, l.visibleOrdinal(i, start), i == l.cursor)
 				style := normalStyle
 				if i == l.cursor {
@@ -800,6 +817,7 @@ func (l *ListView) View() string {
 				b.WriteString(fmt.Sprintf("%s%s%s/\n", cursor, icon, style.Render(item.Name)))
 
 			case "workspace":
+				l.recordMouseRow(b.String(), i)
 				cursor := choicePrefix(l.mobileMode, l.visibleOrdinal(i, start), i == l.cursor)
 				style := normalStyle
 				if i == l.cursor {
@@ -829,6 +847,7 @@ func (l *ListView) View() string {
 				b.WriteString(line + "\n")
 
 			case "herdr_session":
+				l.recordMouseRow(b.String(), i)
 				cursor := choicePrefix(l.mobileMode, l.visibleOrdinal(i, start), i == l.cursor)
 				style := normalStyle
 				if i == l.cursor {
@@ -929,13 +948,14 @@ func (l *ListView) View() string {
 	} else {
 		help = "[n]ew  [e]dit  [d]elete  [*]star  [f]older  [/]filter  [q]uit"
 	}
-	b.WriteString(helpStyle.Render(help))
-
 	padding := lipgloss.NewStyle().Padding(1, 2)
+	contentHeight := l.height - 2
 	if l.compact() {
 		padding = lipgloss.NewStyle().Padding(0, 1)
+		contentHeight = l.height
 	}
-	return padding.Render(b.String())
+	content := renderScreenWithFooter(b.String(), helpStyle.Render(help), contentHeight)
+	return padding.Render(content)
 }
 
 func (l *ListView) herdrUsageView() string {
@@ -958,6 +978,17 @@ func (l *ListView) herdrUsageView() string {
 		}
 		if l.hubAgentErr[key] != nil {
 			summary = "  agents unavailable"
+		}
+		if l.compact() {
+			agentSummary := "loading…"
+			if known && !l.hubAgentLoading[key] {
+				agentSummary = fmt.Sprintf("%d", len(agents))
+			}
+			if l.hubAgentErr[key] != nil {
+				agentSummary = "unavailable"
+			}
+			return labelStyle.Render("Usage") + mutedStyle.Render("  CPU/RAM/age n/a") + "\n" +
+				labelStyle.Render("Agents") + mutedStyle.Render("  "+agentSummary)
 		}
 		return labelStyle.Render("Usage") + mutedStyle.Render("  CPU unavailable  RAM unavailable  MAX AGE unavailable"+summary)
 	}
