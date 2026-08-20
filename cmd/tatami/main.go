@@ -307,6 +307,9 @@ func run(newTabMode, mobileMode bool) error {
 	// directly so the UI renders in the terminal regardless of stdout redirection.
 	var opts []tea.ProgramOption
 	opts = append(opts, tea.WithAltScreen())
+	if mobileMode {
+		opts = append(opts, tea.WithMouseCellMotion())
+	}
 	if os.Getenv("TATAMI_WRAPPER") == "1" {
 		tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 		if err == nil {

@@ -351,9 +351,13 @@ func (a *App) scheduleHubRefresh(endpoints []herdrhub.Endpoint) tea.Cmd {
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		resized := a.width > 0 && (a.width != msg.Width || a.height != msg.Height)
 		a.width = msg.Width
 		a.height = msg.Height
 		a.listView.SetSize(msg.Width, msg.Height)
+		if resized {
+			return a, tea.ClearScreen
+		}
 		return a, nil
 	case herdrHubRefreshResultMsg:
 		if msg.Generation != a.herdrHubGeneration {
@@ -424,6 +428,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.listView.SetHerdrUsage(msg.Session, usage, msg.Err)
 		return a, nil
+	case tea.MouseMsg:
+		return a.updateMouse(msg)
 
 	case tea.KeyMsg:
 		// Global quit
@@ -475,6 +481,69 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return a, nil
+}
+
+func (a *App) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if !a.mobileMode {
+		return a, nil
+	}
+
+	event := tea.MouseEvent(msg)
+	switch event.Button {
+	case tea.MouseButtonWheelUp:
+		return a.Update(tea.KeyMsg{Type: tea.KeyUp})
+	case tea.MouseButtonWheelDown:
+		return a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	case tea.MouseButtonWheelLeft:
+		return a.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	case tea.MouseButtonWheelRight:
+		return a.Update(tea.KeyMsg{Type: tea.KeyRight})
+	case tea.MouseButtonLeft:
+		if event.Action != tea.MouseActionPress {
+			return a, nil
+		}
+	default:
+		return a, nil
+	}
+
+	if a.currentView == ViewList {
+		if !a.listView.selectMouseRow(event.Y) {
+			return a, nil
+		}
+		return a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	}
+	if !a.currentViewSupportsNumberedTap() {
+		return a, nil
+	}
+
+	choice, ok := numberedChoiceAtRow(a.View(), event.Y)
+	if !ok {
+		return a, nil
+	}
+	model, selectCmd := a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{choice}})
+	updated, ok := model.(*App)
+	if !ok {
+		return model, selectCmd
+	}
+	model, enterCmd := updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	return model, batchCommands(selectCmd, enterCmd)
+}
+
+func (a *App) currentViewSupportsNumberedTap() bool {
+	switch a.currentView {
+	case ViewActions,
+		ViewTemplates,
+		ViewWorktree,
+		ViewWorktreeActions,
+		ViewSessions,
+		ViewHerdrOpenMode,
+		ViewHerdrSessionPicker,
+		ViewHerdrSessionDelete,
+		ViewHerdrHostDelete:
+		return true
+	default:
+		return false
+	}
 }
 
 func mergeHubSnapshots(endpoints []herdrhub.Endpoint, current, updates []herdrhub.Snapshot) []herdrhub.Snapshot {

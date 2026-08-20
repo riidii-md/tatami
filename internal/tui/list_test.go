@@ -13,6 +13,7 @@ import (
 	"github.com/OleksandrBesan/tatami/internal/systemusage"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestListViewShowsCachedRemoteSessionsWithEndpointIdentity(t *testing.T) {
@@ -237,6 +238,58 @@ func TestMobileHomeNumbersSelectVisibleItemsAndUseCompactRows(t *testing.T) {
 	}
 }
 
+func TestMobileHomeUsesAvailableHeightBeyondNineRows(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{Name: "project-01", Path: "/tmp/project-01"})
+	for i := 2; i <= 12; i++ {
+		name := fmt.Sprintf("project-%02d", i)
+		if err := store.Create(&workspace.Workspace{Name: name, Path: "/tmp/" + name}); err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+	}
+
+	list := NewListViewWithHerdrSessions(store, nil)
+	list.SetMobileMode(true)
+	list.SetSize(76, 40)
+
+	if view := list.View(); !strings.Contains(view, "project-12") {
+		t.Fatalf("mobile home still caps the available rows:\n%s", view)
+	}
+}
+
+func TestHomeUsesReportedTerminalHeight(t *testing.T) {
+	store := newTestStore(t, &workspace.Workspace{
+		Name: "project",
+		Path: "/tmp/project",
+	})
+
+	for _, test := range []struct {
+		name   string
+		mobile bool
+	}{
+		{name: "plain"},
+		{name: "mobile", mobile: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			list := NewListViewWithHerdrSessions(store, nil)
+			list.SetMobileMode(test.mobile)
+			list.SetSize(76, 40)
+
+			view := list.View()
+			if got := lipgloss.Height(view); got != 40 {
+				t.Fatalf("rendered height = %d; want reported terminal height 40:\n%s", got, view)
+			}
+			lines := strings.Split(view, "\n")
+			lastContentRow := len(lines) - 1
+			for lastContentRow >= 0 && strings.TrimSpace(lines[lastContentRow]) == "" {
+				lastContentRow--
+			}
+			if got := lines[lastContentRow]; !strings.Contains(got, "[q]uit") || lastContentRow < 38 {
+				t.Fatalf("last content row = %d (%q); want bottom-anchored help", lastContentRow, got)
+			}
+		})
+	}
+}
+
 func TestNarrowHomeAutomaticallyUsesCompactRows(t *testing.T) {
 	store := newTestStore(t, &workspace.Workspace{
 		Name: "project",
@@ -312,9 +365,9 @@ func TestStoppedHerdrSessionRendersStoppedUsageWithoutLoadedSummary(t *testing.T
 	}
 }
 
-func TestMobileHomeNumbersReferToCurrentVisiblePage(t *testing.T) {
+func TestMobileHomeNumbersReferToCurrentHeightBasedPage(t *testing.T) {
 	store := newTestStore(t, &workspace.Workspace{Name: "project-01", Path: "/tmp/project-01"})
-	for i := 2; i <= 12; i++ {
+	for i := 2; i <= 24; i++ {
 		name := fmt.Sprintf("project-%02d", i)
 		if err := store.Create(&workspace.Workspace{Name: name, Path: "/tmp/" + name}); err != nil {
 			t.Fatalf("create %s: %v", name, err)
@@ -325,10 +378,18 @@ func TestMobileHomeNumbersReferToCurrentVisiblePage(t *testing.T) {
 	list.SetMobileMode(true)
 	list.SetSize(80, 24)
 	list.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	start, end := list.visibleRange()
+	want := ""
+	for i := start; i < end; i++ {
+		if !listItemIsHeader(list.items[i]) {
+			want = list.items[i].Name
+			break
+		}
+	}
 	list.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
 
 	selected := list.Selected()
-	if selected == nil || selected.Name != "project-04" {
-		t.Fatalf("first choice on final page selected %#v; want project-04", selected)
+	if selected == nil || selected.Name != want {
+		t.Fatalf("first choice on final height-based page selected %#v; want %s", selected, want)
 	}
 }
