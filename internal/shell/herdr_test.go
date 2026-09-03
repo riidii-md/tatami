@@ -317,6 +317,117 @@ func TestHerdrRunWithLayoutInSessionUsesProjectSession(t *testing.T) {
 	}
 }
 
+func TestHerdrEnsureWorkspaceInSessionCreatesLayoutWithoutAttaching(t *testing.T) {
+	var commands [][]string
+	runner := NewHerdrRunnerWithRuntime(func(args ...string) ([]byte, error) {
+		commands = append(commands, append([]string(nil), args...))
+		switch len(commands) {
+		case 1:
+			return []byte(`{"running":true}`), nil
+		case 2:
+			return []byte(`{"result":{"workspaces":[]}}`), nil
+		case 3:
+			return []byte(`{"result":{"root_pane":{"pane_id":"w1:p1"}}}`), nil
+		case 4:
+			return []byte(`{"result":{"agent":{"pane_id":"w1:p1"}}}`), nil
+		default:
+			t.Fatalf("unexpected command: %#v", args)
+			return nil, nil
+		}
+	}, func(string) error {
+		t.Fatal("running Herdr session was started again")
+		return nil
+	})
+
+	ws := &workspace.Workspace{
+		Name: "feature",
+		Path: "/tmp/project-feature",
+		Layout: workspace.Layout{
+			Type:    workspace.LayoutHerdr,
+			MainCmd: "claude",
+		},
+	}
+	if err := runner.EnsureWorkspaceInSession(ws, "agentic"); err != nil {
+		t.Fatalf("EnsureWorkspaceInSession returned error: %v", err)
+	}
+
+	want := [][]string{
+		{"--session", "agentic", "status", "server", "--json"},
+		{"--session", "agentic", "workspace", "list"},
+		{"--session", "agentic", "workspace", "create", "--cwd", "/tmp/project-feature", "--label", "feature", "--focus"},
+		{"--session", "agentic", "agent", "start", "claude", "--kind", "claude", "--pane", "w1:p1"},
+	}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("commands mismatch\ngot:  %#v\nwant: %#v", commands, want)
+	}
+}
+
+func TestHerdrEnsureWorkspaceInSessionRejectsEmptySession(t *testing.T) {
+	runner := NewHerdrRunnerWithExecutor(func(args ...string) ([]byte, error) {
+		t.Fatalf("executor called with %q", args)
+		return nil, nil
+	})
+
+	err := runner.EnsureWorkspaceInSession(&workspace.Workspace{Name: "feature", Path: "/tmp/feature"}, "  ")
+	if err == nil || !strings.Contains(err.Error(), "session name is required") {
+		t.Fatalf("empty session error = %v", err)
+	}
+}
+
+func TestHerdrEnsureWorkspaceInSessionReportsFocusFailureWithoutAttaching(t *testing.T) {
+	var commands [][]string
+	runner := NewHerdrRunnerWithRuntime(func(args ...string) ([]byte, error) {
+		commands = append(commands, append([]string(nil), args...))
+		switch len(commands) {
+		case 1:
+			return []byte(`{"running":true}`), nil
+		case 2:
+			return []byte(`{"result":{"workspaces":[{"workspace_id":"w1","label":"feature"}]}}`), nil
+		case 3:
+			return []byte(`{"result":{"panes":[{"pane_id":"w1:p1","cwd":"/tmp/feature"}]}}`), nil
+		case 4:
+			return nil, errors.New("focus failed")
+		default:
+			t.Fatalf("unexpected attach command: %#v", args)
+			return nil, nil
+		}
+	}, func(string) error {
+		t.Fatal("running Herdr session was started again")
+		return nil
+	})
+
+	err := runner.EnsureWorkspaceInSession(&workspace.Workspace{Name: "feature", Path: "/tmp/feature"}, "agentic")
+	if err == nil || !strings.Contains(err.Error(), "focus failed") {
+		t.Fatalf("focus error = %v", err)
+	}
+}
+
+func TestHerdrEnsureWorkspaceInSessionReportsCreateFailureWithoutAttaching(t *testing.T) {
+	var commands [][]string
+	runner := NewHerdrRunnerWithRuntime(func(args ...string) ([]byte, error) {
+		commands = append(commands, append([]string(nil), args...))
+		switch len(commands) {
+		case 1:
+			return []byte(`{"running":true}`), nil
+		case 2:
+			return []byte(`{"result":{"workspaces":[]}}`), nil
+		case 3:
+			return nil, errors.New("create failed")
+		default:
+			t.Fatalf("unexpected attach command: %#v", args)
+			return nil, nil
+		}
+	}, func(string) error {
+		t.Fatal("running Herdr session was started again")
+		return nil
+	})
+
+	err := runner.EnsureWorkspaceInSession(&workspace.Workspace{Name: "feature", Path: "/tmp/feature"}, "agentic")
+	if err == nil || !strings.Contains(err.Error(), "create failed") {
+		t.Fatalf("create error = %v", err)
+	}
+}
+
 func TestHerdrRunWithLayoutRetriesAgentStartUntilNewPaneIsReady(t *testing.T) {
 	agentAttempts := 0
 	runner := NewHerdrRunnerWithRuntime(func(args ...string) ([]byte, error) {

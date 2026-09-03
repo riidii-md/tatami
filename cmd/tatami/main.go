@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/OleksandrBesan/tatami/internal/agent"
 	"github.com/OleksandrBesan/tatami/internal/config"
+	"github.com/OleksandrBesan/tatami/internal/git"
 	"github.com/OleksandrBesan/tatami/internal/herdrhub"
 	"github.com/OleksandrBesan/tatami/internal/shell"
 	"github.com/OleksandrBesan/tatami/internal/systemusage"
@@ -28,6 +30,15 @@ import (
 var version = "dev"
 var collectHerdrResources = systemusage.CollectHerdr
 var listHerdrSessionsForInventory = shell.ListHerdrSessions
+
+type herdrWorkspaceManager interface {
+	EnsureWorkspaceInSession(ws *workspace.Workspace, session string) error
+}
+
+var newHerdrWorkspaceManager = func() herdrWorkspaceManager { return shell.NewHerdrRunner() }
+var listWorktreesForCLI = git.ListWorktrees
+var createWorktreeForCLI = git.CreateWorktree
+
 var runInteractiveCommand = func(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	cmd.Stdin = os.Stdin
@@ -62,6 +73,21 @@ func main() {
 }
 
 func runCLI(args []string, out, errOut io.Writer) int {
+	if len(args) > 0 && (args[0] == "--help" || args[0] == "-h" || args[0] == "help") {
+		printCLIUsage(out)
+		return 0
+	}
+	if len(args) > 0 && args[0] == "herdr" {
+		paths, err := config.GetPaths()
+		if err == nil {
+			err = handleHerdrCommand(args[1:], paths, out)
+		}
+		if err != nil {
+			fmt.Fprintf(errOut, "Error: %v\n", err)
+			return 1
+		}
+		return 0
+	}
 	if len(args) > 0 && args[0] == "hub" {
 		if err := handleHubCommand(args[1:], out); err != nil {
 			fmt.Fprintf(errOut, "Error: %v\n", err)
@@ -103,6 +129,98 @@ func runCLI(args []string, out, errOut io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func printCLIUsage(out io.Writer) {
+	fmt.Fprintln(out, "Usage:")
+	fmt.Fprintln(out, "  tatami                                      Open the interactive workspace manager")
+	fmt.Fprintln(out, "  tatami herdr add-worktree --project <name> [--session <name>] <branch>...")
+	fmt.Fprintln(out, "  tatami hub inventory --json")
+	fmt.Fprintln(out, "  tatami resources")
+	fmt.Fprintln(out, "  tatami run <agent> [args...]")
+	fmt.Fprintln(out, "  tatami agents [list|status <id>|prune]")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "If --session is omitted, the Herdr worktree command uses HERDR_SESSION.")
+}
+
+func handleHerdrCommand(args []string, paths *config.Paths, out io.Writer) error {
+	if len(args) == 0 || args[0] != "add-worktree" {
+		return errors.New("usage: tatami herdr add-worktree --project <name> [--session <name>] <branch>...")
+	}
+
+	flags := flag.NewFlagSet("tatami herdr add-worktree", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	projectName := flags.String("project", "", "saved Tatami project name")
+	sessionName := flags.String("session", "", "Herdr session name")
+	if err := flags.Parse(args[1:]); err != nil {
+		return fmt.Errorf("parse add-worktree options: %w", err)
+	}
+	if strings.TrimSpace(*projectName) == "" {
+		return errors.New("--project is required")
+	}
+	session := strings.TrimSpace(*sessionName)
+	if session == "" {
+		session = strings.TrimSpace(os.Getenv("HERDR_SESSION"))
+	}
+	if session == "" {
+		return errors.New("--session is required outside a Herdr session (HERDR_SESSION is not set)")
+	}
+	branches := flags.Args()
+	if len(branches) == 0 {
+		return errors.New("at least one worktree branch is required")
+	}
+
+	store, err := workspace.NewStore(paths)
+	if err != nil {
+		return fmt.Errorf("load Tatami workspaces: %w", err)
+	}
+	project, err := store.Get(*projectName)
+	if err != nil {
+		return fmt.Errorf("load Tatami project %q: %w", *projectName, err)
+	}
+	if project.IsRemote() {
+		return fmt.Errorf("Tatami project %q is remote; local worktrees are required", project.Name)
+	}
+	if project.Layout.Type != workspace.LayoutHerdr {
+		return fmt.Errorf("Tatami project %q does not use a Herdr layout", project.Name)
+	}
+
+	worktrees, err := listWorktreesForCLI(project.Path)
+	if err != nil {
+		return fmt.Errorf("list worktrees for Tatami project %q: %w", project.Name, err)
+	}
+	byBranch := make(map[string]git.Worktree, len(worktrees))
+	for _, worktree := range worktrees {
+		if worktree.Branch != "" {
+			byBranch[worktree.Branch] = worktree
+		}
+	}
+
+	manager := newHerdrWorkspaceManager()
+	for _, candidate := range branches {
+		branch := strings.TrimSpace(candidate)
+		if branch == "" {
+			return errors.New("worktree branch must not be empty")
+		}
+		worktree, exists := byBranch[branch]
+		if !exists {
+			worktree, err = createWorktreeForCLI(project.Path, branch)
+			if err != nil {
+				return fmt.Errorf("create worktree for branch %q: %w", branch, err)
+			}
+			byBranch[branch] = worktree
+		}
+
+		target := *project
+		target.Name = worktree.Branch
+		target.Path = worktree.Path
+		target.Remote = nil
+		if err := manager.EnsureWorkspaceInSession(&target, session); err != nil {
+			return fmt.Errorf("add worktree %q to Herdr session %q: %w", branch, session, err)
+		}
+		fmt.Fprintf(out, "Added worktree %s (%s) to Herdr session %s.\n", branch, worktree.Path, session)
+	}
+	return nil
 }
 
 func handleHubCommand(args []string, out io.Writer) error {
