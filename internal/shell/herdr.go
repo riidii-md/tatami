@@ -116,6 +116,16 @@ func (h *HerdrRunner) RunWithLayout(ws *workspace.Workspace) error {
 
 // RunWithLayoutInSession creates or focuses a workspace in the selected Herdr session, then attaches.
 func (h *HerdrRunner) RunWithLayoutInSession(ws *workspace.Workspace, session string) error {
+	if err := h.EnsureWorkspaceInSession(ws, session); err != nil {
+		return err
+	}
+	return h.AttachSession(session)
+}
+
+// EnsureWorkspaceInSession creates or focuses a workspace in the selected
+// Herdr session without attaching an interactive client. This is suitable for
+// headless automation and for callers already running inside another pane.
+func (h *HerdrRunner) EnsureWorkspaceInSession(ws *workspace.Workspace, session string) error {
 	if strings.TrimSpace(session) == "" {
 		return fmt.Errorf("herdr session name is required")
 	}
@@ -130,7 +140,7 @@ func (h *HerdrRunner) RunWithLayoutInSession(ws *workspace.Workspace, session st
 		if _, err := h.exec("--session", session, "workspace", "focus", existing); err != nil {
 			return fmt.Errorf("failed to focus herdr workspace %s: %w", existing, err)
 		}
-		return h.AttachSession(session)
+		return nil
 	}
 	rootPane, err := h.createWorkspace(session, ws)
 	if err != nil {
@@ -153,7 +163,7 @@ func (h *HerdrRunner) RunWithLayoutInSession(ws *workspace.Workspace, session st
 		}
 	}
 
-	return h.AttachSession(session)
+	return nil
 }
 
 // AttachSession attaches to a named Herdr session, starting it when necessary.

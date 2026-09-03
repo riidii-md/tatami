@@ -503,6 +503,211 @@ func TestRunCLIRejectsMissingRunCommand(t *testing.T) {
 	}
 }
 
+type recordingHerdrWorkspaceManager struct {
+	session    string
+	workspaces []*workspace.Workspace
+	err        error
+}
+
+func (r *recordingHerdrWorkspaceManager) EnsureWorkspaceInSession(ws *workspace.Workspace, session string) error {
+	r.session = session
+	copy := *ws
+	r.workspaces = append(r.workspaces, &copy)
+	return r.err
+}
+
+func TestRunCLIHerdrAddWorktreeReusesAndCreatesWorktreesInCurrentSession(t *testing.T) {
+	paths := configureCLIPaths(t)
+	store, err := workspace.NewStore(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := &workspace.Workspace{
+		Name: "tatami",
+		Path: "/repo/tatami",
+		Layout: workspace.Layout{
+			Type:    workspace.LayoutHerdr,
+			MainCmd: "codex",
+			Panes:   []workspace.Pane{{Command: "claude", Direction: "right"}},
+		},
+	}
+	if err := store.Create(project); err != nil {
+		t.Fatal(err)
+	}
+
+	existing := git.Worktree{Path: "/repo/tatami/.worktrees/SA-1863", Branch: "SA-1863"}
+	created := git.Worktree{Path: "/repo/tatami/.worktrees/SA-1840", Branch: "SA-1840"}
+	var createCalls []string
+	originalList := listWorktreesForCLI
+	originalCreate := createWorktreeForCLI
+	originalManager := newHerdrWorkspaceManager
+	listWorktreesForCLI = func(repo string) ([]git.Worktree, error) {
+		if repo != project.Path {
+			t.Fatalf("list repo = %q; want %q", repo, project.Path)
+		}
+		return []git.Worktree{existing}, nil
+	}
+	createWorktreeForCLI = func(repo, branch string) (git.Worktree, error) {
+		createCalls = append(createCalls, branch)
+		if repo != project.Path || branch != "SA-1840" {
+			t.Fatalf("create worktree = (%q, %q)", repo, branch)
+		}
+		return created, nil
+	}
+	manager := &recordingHerdrWorkspaceManager{}
+	newHerdrWorkspaceManager = func() herdrWorkspaceManager { return manager }
+	t.Cleanup(func() {
+		listWorktreesForCLI = originalList
+		createWorktreeForCLI = originalCreate
+		newHerdrWorkspaceManager = originalManager
+	})
+	t.Setenv("HERDR_SESSION", "agentic")
+
+	var out, errOut bytes.Buffer
+	args := []string{"herdr", "add-worktree", "--project", "tatami", "SA-1863", "SA-1840"}
+	if code := runCLI(args, &out, &errOut); code != 0 {
+		t.Fatalf("runCLI code = %d, stderr = %q", code, errOut.String())
+	}
+	if !reflect.DeepEqual(createCalls, []string{"SA-1840"}) {
+		t.Fatalf("created branches = %#v; want only SA-1840", createCalls)
+	}
+	if manager.session != "agentic" || len(manager.workspaces) != 2 {
+		t.Fatalf("manager = session %q, workspaces %#v", manager.session, manager.workspaces)
+	}
+	for i, want := range []git.Worktree{existing, created} {
+		got := manager.workspaces[i]
+		if got.Name != want.Branch || got.Path != want.Path {
+			t.Errorf("workspace %d = %#v; want branch/path from %#v", i, got, want)
+		}
+		if !reflect.DeepEqual(got.Layout, project.Layout) {
+			t.Errorf("workspace %d layout = %#v; want %#v", i, got.Layout, project.Layout)
+		}
+	}
+	for _, want := range []string{"SA-1863", "SA-1840", "agentic"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestHandleHerdrAddWorktreeRequiresExplicitOrCurrentSession(t *testing.T) {
+	paths := configureCLIPaths(t)
+	t.Setenv("HERDR_SESSION", "")
+	store, err := workspace.NewStore(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Create(&workspace.Workspace{
+		Name:   "tatami",
+		Path:   "/repo/tatami",
+		Layout: workspace.Layout{Type: workspace.LayoutHerdr},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	err = handleHerdrCommand([]string{"add-worktree", "--project", "tatami", "SA-1863"}, paths, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "--session") || !strings.Contains(err.Error(), "HERDR_SESSION") {
+		t.Fatalf("missing session error = %v", err)
+	}
+}
+
+func TestHandleHerdrAddWorktreeValidatesArgumentsAndProject(t *testing.T) {
+	paths := configureCLIPaths(t)
+	t.Setenv("HERDR_SESSION", "agentic")
+	store, err := workspace.NewStore(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, project := range []*workspace.Workspace{
+		{Name: "remote", Path: "/repo/remote", Remote: &workspace.Remote{Host: "workbox"}, Layout: workspace.Layout{Type: workspace.LayoutHerdr}},
+		{Name: "zellij", Path: "/repo/zellij", Layout: workspace.Layout{Type: workspace.LayoutZellij}},
+	} {
+		if err := store.Create(project); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "unknown command", args: []string{"unknown"}, want: "usage:"},
+		{name: "unknown flag", args: []string{"add-worktree", "--unknown"}, want: "parse add-worktree options"},
+		{name: "missing project option", args: []string{"add-worktree", "SA-1863"}, want: "--project is required"},
+		{name: "missing branch", args: []string{"add-worktree", "--project", "remote"}, want: "at least one worktree branch"},
+		{name: "missing saved project", args: []string{"add-worktree", "--project", "missing", "SA-1863"}, want: "workspace not found"},
+		{name: "remote project", args: []string{"add-worktree", "--project", "remote", "SA-1863"}, want: "local worktrees are required"},
+		{name: "wrong layout", args: []string{"add-worktree", "--project", "zellij", "SA-1863"}, want: "does not use a Herdr layout"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := handleHerdrCommand(test.args, paths, &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v; want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestHandleHerdrAddWorktreeReportsGitAndHerdrFailures(t *testing.T) {
+	paths := configureCLIPaths(t)
+	store, err := workspace.NewStore(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Create(&workspace.Workspace{
+		Name:   "tatami",
+		Path:   "/repo/tatami",
+		Layout: workspace.Layout{Type: workspace.LayoutHerdr},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	originalList := listWorktreesForCLI
+	originalCreate := createWorktreeForCLI
+	originalManager := newHerdrWorkspaceManager
+	t.Cleanup(func() {
+		listWorktreesForCLI = originalList
+		createWorktreeForCLI = originalCreate
+		newHerdrWorkspaceManager = originalManager
+	})
+
+	listWorktreesForCLI = func(string) ([]git.Worktree, error) { return nil, errors.New("git unavailable") }
+	err = handleHerdrCommand([]string{"add-worktree", "--project", "tatami", "--session", "agentic", "SA-1840"}, paths, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "git unavailable") {
+		t.Fatalf("list error = %v", err)
+	}
+
+	listWorktreesForCLI = func(string) ([]git.Worktree, error) { return nil, nil }
+	createWorktreeForCLI = func(string, string) (git.Worktree, error) { return git.Worktree{}, errors.New("create failed") }
+	err = handleHerdrCommand([]string{"add-worktree", "--project", "tatami", "--session", "agentic", "SA-1840"}, paths, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "create failed") {
+		t.Fatalf("create error = %v", err)
+	}
+
+	existing := git.Worktree{Path: "/repo/tatami/.worktrees/SA-1840", Branch: "SA-1840"}
+	listWorktreesForCLI = func(string) ([]git.Worktree, error) { return []git.Worktree{existing}, nil }
+	manager := &recordingHerdrWorkspaceManager{err: errors.New("Herdr unavailable")}
+	newHerdrWorkspaceManager = func() herdrWorkspaceManager { return manager }
+	err = handleHerdrCommand([]string{"add-worktree", "--project", "tatami", "--session", "agentic", "SA-1840"}, paths, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "Herdr unavailable") {
+		t.Fatalf("Herdr error = %v", err)
+	}
+}
+
+func TestRunCLIHelpDocumentsHeadlessHerdrWorktreeCommand(t *testing.T) {
+	var out, errOut bytes.Buffer
+	if code := runCLI([]string{"--help"}, &out, &errOut); code != 0 {
+		t.Fatalf("help code = %d, stderr = %q", code, errOut.String())
+	}
+	for _, want := range []string{"tatami herdr add-worktree", "--project", "--session"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("help output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
 func TestRunCLIPrintsVersionedFederationInventory(t *testing.T) {
 	paths := configureCLIPaths(t)
 	store, err := workspace.NewStore(paths)

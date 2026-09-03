@@ -101,6 +101,21 @@ sessions, set `show_startup_tips false` in `~/.config/zellij/config.kdl`.
 tatami
 ```
 
+For headless automation, add one or more Git worktrees from a saved Tatami
+project to a Herdr session without opening the TUI:
+
+```bash
+tatami herdr add-worktree --project tatami --session agentic SA-1863 SA-1840
+```
+
+Tatami reuses a worktree when the exact branch already has one and creates a
+missing worktree under the project's `.worktrees/` directory. Each target
+inherits the saved project's Herdr layout, including its configured agents and
+panes. When the command runs inside Herdr, `--session` may be omitted and
+defaults to `HERDR_SESSION`. The command creates or focuses the Herdr
+workspaces but does not attach an interactive client, so it is safe to invoke
+from an agent or another Herdr pane.
+
 For compact, phone-friendly navigation over SSH:
 
 ```bash
