@@ -1,6 +1,7 @@
 package herdrhub
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -390,18 +391,51 @@ func TestClientClassifiesMissingHerdrFromStderr(t *testing.T) {
 }
 func TestCacheIsVersionedAndDoesNotPersistErrors(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "cache.json")
-	if err := SaveCache(p, Cache{Snapshots: []Snapshot{{EndpointID: "work", State: StateOffline, Error: "secret stderr"}}}); err != nil {
+	if err := SaveCache(p, Cache{Snapshots: []Snapshot{{
+		EndpointID: "work",
+		State:      StateOffline,
+		Error:      "secret stderr",
+		Workspaces: []WorkspaceSummary{{Name: "API", Path: "/srv/api", Repository: "github.com/riidii/tatami"}},
+	}}}); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(p)
-	if strings.Contains(string(b), "secret") || !strings.Contains(string(b), `"version":1`) {
+	if strings.Contains(string(b), "secret") || !strings.Contains(string(b), `"version":1`) || !strings.Contains(string(b), "github.com/riidii/tatami") {
 		t.Fatalf("unsafe cache: %s", b)
+	}
+	cache, err := LoadCache(p)
+	if err != nil || cache.Snapshots[0].Workspaces[0].Repository != "github.com/riidii/tatami" {
+		t.Fatalf("cache round trip = %#v err=%v", cache, err)
 	}
 	if err := os.WriteFile(p, []byte(`{"version":2,"snapshots":[]}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := LoadCache(p); err == nil {
 		t.Fatal("unsupported cache accepted")
+	}
+}
+
+func TestLegacyCacheLoadDoesNotRewriteAndUnsafeRepositoryIsRejected(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "cache.json")
+	legacy := []byte(`{"version":1,"snapshots":[{"endpoint_id":"work","state":"online","workspaces":[{"name":"API","path":"/srv/api"}]}]}`)
+	if err := os.WriteFile(p, legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadCache(p); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(p)
+	if err != nil || !bytes.Equal(after, legacy) {
+		t.Fatalf("legacy cache was rewritten: %q err=%v", after, err)
+	}
+	unsafePath := filepath.Join(t.TempDir(), "unsafe.json")
+	err = SaveCache(unsafePath, Cache{Snapshots: []Snapshot{{
+		EndpointID: "work",
+		State:      StateOnline,
+		Workspaces: []WorkspaceSummary{{Name: "API", Path: "/srv/api", Repository: "https%3A%2F%2Fuser%3Acredential-sentinel%40example.com/org/repo"}},
+	}}})
+	if err == nil || strings.Contains(err.Error(), "credential-sentinel") {
+		t.Fatalf("unsafe repository cache error = %v", err)
 	}
 }
 

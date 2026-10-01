@@ -57,6 +57,13 @@ func TestMobileChoicePrefixShowsNumberWithoutChangingDesktopPrefix(t *testing.T)
 	}
 }
 
+func TestNumberedChoiceAtRowUsesRenderedPrefixBeforeLabelMarkers(t *testing.T) {
+	choice, ok := numberedChoiceAtRow("  [1] first\n  [2] echo [1]\n", 1)
+	if !ok || choice != '2' {
+		t.Fatalf("choice=%q ok=%v, want prefix 2", choice, ok)
+	}
+}
+
 func TestMobilePanelDropsDecorativeBorder(t *testing.T) {
 	mobile := renderPanel("content", true)
 	desktop := renderPanel("content", false)

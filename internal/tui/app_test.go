@@ -64,6 +64,50 @@ func TestMobileMouseTapOpensExactHomeRowAndAction(t *testing.T) {
 	}
 }
 
+func TestMobileMouseTapUsesLastRenderedStableRowAfterReorder(t *testing.T) {
+	app := NewApp(newTestStore(t, &workspace.Workspace{Name: "project", Path: t.TempDir()}), WithMobileMode(), withoutHerdrSessions())
+	app.templateView = NewTemplateView()
+	app.templateView.templates = []workspace.Template{{Name: "alpha", MainCmd: "alpha"}, {Name: "beta", MainCmd: "beta"}}
+	app.templateView.rebuildSearch()
+	app.applyMobileMode(app.templateView)
+	app.previousView = ViewCreate
+	app.currentView = ViewTemplates
+	app.Update(tea.WindowSizeMsg{Width: 76, Height: 20})
+
+	betaRow := renderedRowContaining(t, app.View(), "beta")
+	app.templateView.templates = []workspace.Template{{Name: "beta", MainCmd: "beta"}, {Name: "alpha", MainCmd: "alpha"}}
+	app.templateView.rebuildSearch()
+	model, _ := app.Update(tea.MouseMsg{X: 8, Y: betaRow, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	app = model.(*App)
+	if app.currentView != ViewCreate || app.createView.templateName != "beta" {
+		t.Fatalf("stable tap opened view=%v template=%q", app.currentView, app.createView.templateName)
+	}
+}
+
+func TestMobileMouseTapSelectsLayoutPaneSemantically(t *testing.T) {
+	app := NewApp(newTestStore(t, &workspace.Workspace{Name: "project", Path: t.TempDir()}), WithMobileMode(), withoutHerdrSessions())
+	app.layoutEditor.SetPanes([]workspace.Pane{{Command: "first", Direction: "down"}, {Command: "echo [1]", Direction: "right"}})
+	app.currentView = ViewLayout
+	app.Update(tea.WindowSizeMsg{Width: 76, Height: 20})
+	secondRow := renderedRowContaining(t, app.View(), "echo [1]")
+	model, _ := app.Update(tea.MouseMsg{X: 8, Y: secondRow, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	app = model.(*App)
+	if !app.layoutEditor.IsEditing() || app.layoutEditor.cursor != 1 {
+		t.Fatalf("layout tap editing=%v cursor=%d", app.layoutEditor.IsEditing(), app.layoutEditor.cursor)
+	}
+}
+
+func TestLayoutCtrlNAddsFirstPaneThroughAppDispatch(t *testing.T) {
+	app := NewApp(newTestStore(t, &workspace.Workspace{Name: "project", Path: t.TempDir()}), withoutHerdrSessions())
+	app.layoutEditor.SetPanes(nil)
+	app.currentView = ViewLayout
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyCtrlN})
+	app = model.(*App)
+	if !app.layoutEditor.IsEditing() || len(app.layoutEditor.GetPanes()) != 1 || app.layoutEditor.cursor != 0 {
+		t.Fatalf("ctrl+n editing=%v panes=%#v cursor=%d", app.layoutEditor.IsEditing(), app.layoutEditor.GetPanes(), app.layoutEditor.cursor)
+	}
+}
+
 func TestMobileMouseWheelNavigatesHomeRows(t *testing.T) {
 	store := newTestStore(t, &workspace.Workspace{Name: "first", Path: t.TempDir()})
 	if err := store.Create(&workspace.Workspace{Name: "second", Path: t.TempDir()}); err != nil {
@@ -73,6 +117,8 @@ func TestMobileMouseWheelNavigatesHomeRows(t *testing.T) {
 	app.Update(tea.WindowSizeMsg{Width: 76, Height: 40})
 
 	model, _ := app.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown})
+	app = model.(*App)
+	model, _ = app.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown})
 	app = model.(*App)
 	if selected := app.listView.Selected(); selected == nil || selected.Name != "second" {
 		t.Fatalf("wheel selected %#v; want second", selected)
@@ -470,6 +516,7 @@ func TestHerdrHostAddEditAndConfirmedRemove(t *testing.T) {
 		}, nil),
 	)
 
+	app.Update(tea.KeyMsg{Type: tea.KeyDown})
 	app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
 	if app.currentView != ViewHerdrHost {
 		t.Fatalf("add opened view %v", app.currentView)
@@ -729,6 +776,8 @@ func TestHerdrWorktreeCanOpenInChosenExistingSession(t *testing.T) {
 	updated := model.(*App)
 	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyDown})
 	updated = model.(*App)
+	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated = model.(*App)
 	model, cmd := updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	updated = model.(*App)
 
@@ -841,6 +890,8 @@ func TestHerdrExistingSessionPickerPrefersCurrentSession(t *testing.T) {
 
 	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	updated := model.(*App)
+	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated = model.(*App)
 	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyDown})
 	updated = model.(*App)
 	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -1112,8 +1163,10 @@ func TestMobileModeNumberSelectionRequiresEnterToOpen(t *testing.T) {
 	}
 	app := NewApp(store, withoutHerdrSessions(), WithMobileMode())
 
-	model, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyDown})
 	updated := model.(*App)
+	model, cmd := updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	updated = model.(*App)
 	if updated.currentView != ViewList || cmd != nil || updated.result != nil {
 		t.Fatalf("number selection opened immediately: view=%v result=%#v cmd=%T", updated.currentView, updated.result, cmd)
 	}
@@ -1141,6 +1194,8 @@ func TestMobileActionNumberSelectionStillRequiresEnter(t *testing.T) {
 
 	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	updated := model.(*App)
+	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated = model.(*App)
 	model, cmd := updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
 	updated = model.(*App)
 	if updated.currentView != ViewActions || cmd != nil || updated.result != nil {
@@ -1163,6 +1218,8 @@ func TestMobileBackReturnsFromMenuAndDoesNotQuitAtRoot(t *testing.T) {
 
 	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	updated := model.(*App)
+	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated = model.(*App)
 	model, cmd := updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
 	updated = model.(*App)
 	if updated.currentView != ViewList || cmd != nil {
@@ -1171,8 +1228,8 @@ func TestMobileBackReturnsFromMenuAndDoesNotQuitAtRoot(t *testing.T) {
 
 	model, cmd = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
 	updated = model.(*App)
-	if updated.currentView != ViewList || cmd != nil || updated.result != nil {
-		t.Fatalf("mobile back at root quit or changed state: view=%v result=%#v cmd=%T", updated.currentView, updated.result, cmd)
+	if updated.currentView != ViewList || updated.result != nil || updated.listView.search.Query() != "b" {
+		t.Fatalf("mobile b in root search changed state: view=%v result=%#v query=%q cmd=%T", updated.currentView, updated.result, updated.listView.search.Query(), cmd)
 	}
 }
 
@@ -1180,8 +1237,10 @@ func TestMobileBackKeyRemainsTextInsideCreateForm(t *testing.T) {
 	store := newTestStore(t, &workspace.Workspace{Name: "project", Path: "/tmp/project"})
 	app := NewApp(store, withoutHerdrSessions(), WithMobileMode())
 
-	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyDown})
 	updated := model.(*App)
+	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	updated = model.(*App)
 	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
 	updated = model.(*App)
 	if updated.currentView != ViewCreate {
@@ -1205,6 +1264,8 @@ func TestMobileBackLeavesFolderAndRemainsTextWhileFiltering(t *testing.T) {
 	if updated.listView.CurrentFolder() != "team" {
 		t.Fatalf("enter selected folder %q; want team", updated.listView.CurrentFolder())
 	}
+	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated = model.(*App)
 	model, cmd := updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
 	updated = model.(*App)
 	if updated.listView.CurrentFolder() != "" || cmd != nil {
@@ -1218,8 +1279,8 @@ func TestMobileBackLeavesFolderAndRemainsTextWhileFiltering(t *testing.T) {
 	updated = model.(*App)
 	model, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
 	updated = model.(*App)
-	if !updated.listView.IsFiltering() || updated.listView.filter.Value() != "b" {
-		t.Fatalf("mobile filter after b: filtering=%v value=%q", updated.listView.IsFiltering(), updated.listView.filter.Value())
+	if !updated.listView.IsFiltering() || updated.listView.search.Query() != "b" {
+		t.Fatalf("mobile filter after b: filtering=%v value=%q", updated.listView.IsFiltering(), updated.listView.search.Query())
 	}
 }
 

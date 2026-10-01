@@ -4,9 +4,10 @@ import (
 	"fmt"
 	"strings"
 
+	appsearch "github.com/OleksandrBesan/tatami/internal/search"
+	"github.com/OleksandrBesan/tatami/internal/workspace"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/OleksandrBesan/tatami/internal/workspace"
 )
 
 type layoutField int
@@ -25,6 +26,9 @@ type LayoutEditor struct {
 	commandInput  textinput.Model
 	directionOpts []string
 	directionIdx  int
+	search        searchController
+	generation    uint64
+	mobileMode    bool
 }
 
 // NewLayoutEditor creates a new layout editor
@@ -42,6 +46,7 @@ func NewLayoutEditor() *LayoutEditor {
 		commandInput:  cmdInput,
 		directionOpts: []string{"down", "right"},
 		directionIdx:  0,
+		search:        newSearchController("pane number or direction"),
 	}
 }
 
@@ -51,6 +56,8 @@ func (l *LayoutEditor) SetPanes(panes []workspace.Pane) {
 	copy(l.panes, panes)
 	l.cursor = 0
 	l.editing = false
+	l.search.Clear()
+	l.rebuildSearch()
 }
 
 // GetPanes returns the current panes
@@ -61,6 +68,10 @@ func (l *LayoutEditor) GetPanes() []workspace.Pane {
 // IsEditing returns whether currently editing a pane
 func (l *LayoutEditor) IsEditing() bool {
 	return l.editing
+}
+
+func (l *LayoutEditor) SetMobileMode(enabled bool) {
+	l.mobileMode = enabled
 }
 
 func (l *LayoutEditor) startEdit() {
@@ -88,6 +99,7 @@ func (l *LayoutEditor) stopEdit(save bool) {
 	}
 	l.editing = false
 	l.commandInput.Blur()
+	l.rebuildSearch()
 }
 
 func (l *LayoutEditor) addPane() {
@@ -96,6 +108,8 @@ func (l *LayoutEditor) addPane() {
 		Direction: "down",
 	})
 	l.cursor = len(l.panes) - 1
+	l.rebuildSearch()
+	l.search.SelectLast()
 	l.startEdit()
 }
 
@@ -107,6 +121,7 @@ func (l *LayoutEditor) deletePane() {
 	if l.cursor >= len(l.panes) && l.cursor > 0 {
 		l.cursor--
 	}
+	l.rebuildSearch()
 }
 
 // Update handles input for the layout editor
@@ -152,24 +167,82 @@ func (l *LayoutEditor) Update(msg tea.Msg) tea.Cmd {
 	// Not editing - handle list navigation
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if msg.String() == "ctrl+n" {
+			l.addPane()
+			return nil
+		}
+		event, cmd := l.handleKey(msg)
+		if event.Consumed {
+			if event.Activate {
+				l.startEdit()
+			}
+			return cmd
+		}
 		switch msg.String() {
-		case "j", "down":
-			if l.cursor < len(l.panes)-1 {
-				l.cursor++
-			}
-		case "k", "up":
-			if l.cursor > 0 {
-				l.cursor--
-			}
-		case "enter", "e":
+		case "j":
+			l.search.Move(1)
+		case "k":
+			l.search.Move(-1)
+		case "e":
 			l.startEdit()
 		case "a":
 			l.addPane()
 		case "d", "x":
 			l.deletePane()
+		default:
+			if l.mobileMode {
+				l.search.SelectVisibleChoice(msg.String(), 10, 1)
+			}
 		}
+		l.syncCursorFromSearch()
 	}
 	return nil
+}
+
+func (l *LayoutEditor) handleKey(msg tea.KeyMsg) (searchEvent, tea.Cmd) {
+	if l.editing {
+		return searchEvent{}, nil
+	}
+	event, cmd := l.search.Update(msg)
+	l.syncCursorFromSearch()
+	return event, cmd
+}
+
+func (l *LayoutEditor) rebuildSearch() {
+	l.generation++
+	documents := make([]appsearch.Document, 0, len(l.panes))
+	rows := make([]searchRow, 0, len(l.panes))
+	for index, pane := range l.panes {
+		id := appsearch.ID(fmt.Sprintf("layout:%d:%d", l.generation, index))
+		documents = append(documents, appsearch.Document{ID: id, Kind: "layout-pane", Primary: fmt.Sprintf("Pane %d", index+1), Secondary: pane.Direction, Ordinal: index})
+		rows = append(rows, searchRow{RowID: id, DocumentID: id})
+	}
+	_ = l.search.ReplaceDocuments(l.generation, documents, rows)
+	l.search.setActiveIndex(l.cursor)
+	l.syncCursorFromSearch()
+}
+
+func (l *LayoutEditor) syncCursorFromSearch() {
+	id, ok := l.search.ActiveDocumentID()
+	if !ok {
+		l.cursor = 0
+		return
+	}
+	for index := range l.panes {
+		if id == appsearch.ID(fmt.Sprintf("layout:%d:%d", l.generation, index)) {
+			l.cursor = index
+			return
+		}
+	}
+}
+
+func (l *LayoutEditor) paneIndexByID(id appsearch.ID) (int, bool) {
+	for index := range l.panes {
+		if id == appsearch.ID(fmt.Sprintf("layout:%d:%d", l.generation, index)) {
+			return index, true
+		}
+	}
+	return 0, false
 }
 
 // View renders the layout editor
@@ -177,17 +250,27 @@ func (l *LayoutEditor) View() string {
 	var b strings.Builder
 
 	b.WriteString(labelStyle.Render("Layout Panes"))
+	b.WriteString("\n")
+	if !l.editing {
+		b.WriteString(l.search.QueryView())
+	}
 	b.WriteString("\n\n")
 
 	if len(l.panes) == 0 {
-		b.WriteString(mutedStyle.Render("  No panes. Press 'a' to add one."))
+		b.WriteString(mutedStyle.Render("  No panes. Press Ctrl+N to add one."))
 		b.WriteString("\n")
 	} else {
-		for i, pane := range l.panes {
-			cursor := "  "
+		start, rows := l.search.VisibleRows(10, 1)
+		for visibleIndex, row := range rows {
+			searchIndex := start + visibleIndex
+			i, ok := l.paneIndexByID(row.DocumentID)
+			if !ok {
+				continue
+			}
+			pane := l.panes[i]
+			cursor := choicePrefix(l.mobileMode, visibleIndex, searchIndex == l.search.ActiveIndex())
 			style := normalStyle
-			if i == l.cursor {
-				cursor = "> "
+			if searchIndex == l.search.ActiveIndex() {
 				style = selectedStyle
 			}
 
@@ -197,6 +280,10 @@ func (l *LayoutEditor) View() string {
 			}
 			line := fmt.Sprintf("%s%s [%s]", cursor, cmd, pane.Direction)
 			b.WriteString(style.Render(line))
+			b.WriteString("\n")
+		}
+		if l.search.Truncated() {
+			b.WriteString(mutedStyle.Render("Results truncated."))
 			b.WriteString("\n")
 		}
 	}
@@ -235,7 +322,7 @@ func (l *LayoutEditor) View() string {
 	}
 
 	// Help
-	help := "[a]dd  [e]dit  [d]elete  [esc]done"
+	help := "[type]search  [↓]browse  [enter]edit  [ctrl+n]add  [esc]clear/done"
 	if l.editing {
 		help = "[tab]next  [enter]save  [esc]cancel"
 	}

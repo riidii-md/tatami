@@ -100,14 +100,19 @@ layout automation.
 
 ## Controls and cache
 
-- `Enter` expands an online host, authenticates/discovers an unavailable host,
-  or opens the selected workspace/session.
-- `Space` collapses or expands a host without connecting.
-- `r` refreshes the selected host, including a discovered downstream host.
-- `R` refreshes saved top-level hosts.
-- `/` filters local and discovered workspaces, sessions, and host labels.
-- `a`, `e`, and `d` manage top-level saved hosts. Downstream hosts are managed
-  on the Tatami installation that owns them.
+- Type immediately to search currently known hosts, workspaces, sessions, safe
+  cached agent metadata, paths/folders, and sanitized repository identities.
+- `↓` enters browse focus on the first full or filtered result. `/` returns to
+  search focus; `Esc` clears the query before performing normal back behavior.
+- In browse focus, `Enter` expands an online host,
+  authenticates/discovers an unavailable host, or opens the selected
+  workspace/session. `Space` collapses or expands a host without connecting.
+- In browse focus, `r` refreshes the selected host, `R` refreshes saved
+  top-level hosts, and `a`, `e`, and `d` manage top-level saved hosts.
+  Downstream hosts are managed on the Tatami installation that owns them.
+- Typing never starts SSH discovery, Git inspection, Herdr listing, or remote
+  agent queries. Results describe known cached data and retain loading, stale,
+  offline, and undiscovered boundaries.
 
 The private inventory cache lives at
 `$XDG_STATE_HOME/tatami/herdr-hub.json` with mode `0600`. Cached successful data
@@ -115,3 +120,10 @@ may remain visible as stale while a host is unreachable. Remote rows are
 navigation-only; destructive session and workspace operations remain local.
 Remote CPU and RAM are unavailable until Herdr defines a compatible read-only
 metrics capability.
+
+Federated inventory version 1 may include an optional `repository` display
+identity such as `github.com/owner/repository`. The Tatami instance that owns
+the workspace derives it locally and removes credentials, transport usernames,
+query strings, fragments, ports, and the trailing `.git` before validation,
+caching, federation, or rendering. Raw origin URLs are never shared. Older
+version-1 writers omit the field and older JSON readers ignore it.

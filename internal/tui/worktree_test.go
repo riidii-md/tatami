@@ -36,6 +36,7 @@ func TestWorktreeFilterNarrowsExistingWorktreesAndSelectsMatch(t *testing.T) {
 	}
 
 	view.Update(keyMsg("down"))
+	view.Update(keyMsg("down"))
 	cmd := view.Update(keyMsg("enter"))
 	if selected := view.Selected(); selected == nil || selected.Branch != "SA-2094-coa-raw-ql-dataset" {
 		t.Fatalf("selected worktree = %#v, want SA-2094", selected)
@@ -68,7 +69,7 @@ func TestWorktreeFilterNoMatchOffersCreateWithQuery(t *testing.T) {
 	view.Update(keyMsg("/"))
 	view.Update(textMsg("SA-2600-new-work"))
 	rendered := view.View()
-	for _, want := range []string{"No matching worktrees", "+ Create new worktree"} {
+	for _, want := range []string{"+ Create new worktree", "SA-2600-new-work"} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("empty filtered view missing %q:\n%s", want, rendered)
 		}
@@ -97,8 +98,8 @@ func TestWorktreeFilterEscapeClearsBeforeLeavingPicker(t *testing.T) {
 	if updated.currentView != ViewWorktree {
 		t.Fatalf("first escape opened view %v, want ViewWorktree", updated.currentView)
 	}
-	if updated.worktreeView.IsFiltering() {
-		t.Fatal("first escape did not clear worktree filter")
+	if !updated.worktreeView.IsFiltering() || updated.worktreeView.search.Query() != "" {
+		t.Fatal("first escape did not clear worktree search")
 	}
 	if rendered := updated.worktreeView.View(); !strings.Contains(rendered, "develop") || !strings.Contains(rendered, "codex-support") {
 		t.Fatalf("cleared filter did not restore worktrees:\n%s", rendered)
@@ -119,6 +120,7 @@ func TestWorktreeFilterQueryChangeResetsSelection(t *testing.T) {
 	view.Update(keyMsg("/"))
 	view.Update(textMsg("SA-2"))
 	view.Update(keyMsg("down"))
+	view.Update(keyMsg("/"))
 	view.Update(textMsg("294"))
 
 	view.Update(keyMsg("enter"))
@@ -138,21 +140,57 @@ func TestMobileBackKeyRemainsTextInsideWorktreeFilter(t *testing.T) {
 	if updated.currentView != ViewWorktree {
 		t.Fatalf("typing b in mobile worktree filter navigated to view %v", updated.currentView)
 	}
-	if got := updated.worktreeView.filter.Value(); got != "b" {
+	if got := updated.worktreeView.search.Query(); got != "b" {
 		t.Fatalf("mobile worktree filter = %q, want b", got)
 	}
 }
 
+func TestWorktreeSearchMatchesCommitAndRepositoryAndDeletesStablePath(t *testing.T) {
+	view := newFilterableWorktreeView([]git.Worktree{
+		{Branch: "main", Path: "/repo", Commit: "1111111111111111", IsMain: true},
+		{Branch: "feature", Path: "/repo/.worktrees/feature", Commit: "abcdef1234567890"},
+	})
+	view.SetRepositoryIdentity("github.com/riidii/tatami")
+	view.Update(textMsg("abcdef123456"))
+	if len(view.search.Rows()) == 0 || view.worktreeByID(view.search.Rows()[0].DocumentID).Path != "/repo/.worktrees/feature" {
+		t.Fatalf("commit search rows = %#v", view.search.Rows())
+	}
+	view.clearFilter()
+	view.rebuildSearch()
+	view.Update(textMsg("riidii/tatami"))
+	if len(view.search.Rows()) < 2 {
+		t.Fatalf("repository search rows = %#v", view.search.Rows())
+	}
+	view.Update(keyMsg("down"))
+	view.Update(keyMsg("down"))
+	view.Update(keyMsg("d"))
+	if view.Mode() != WorktreeModeConfirmDelete || view.worktrees[view.deleteIndex].Path != "/repo/.worktrees/feature" {
+		t.Fatalf("delete target mode=%v index=%d worktrees=%#v", view.Mode(), view.deleteIndex, view.worktrees)
+	}
+}
+
+func TestInvalidWorktreeQueryDoesNotOfferSyntheticCreate(t *testing.T) {
+	for _, query := range []string{"bad branch", "HEAD", "topic@{1", "foo/.bar", "topic.lock/child", "topic/child.lock"} {
+		view := newFilterableWorktreeView([]git.Worktree{{Branch: "main", Path: "/repo", IsMain: true}})
+		view.Update(textMsg(query))
+		for _, row := range view.search.Rows() {
+			if row.DocumentID == worktreeCreateSearchID {
+				t.Fatalf("invalid query %q offered create result: %#v", query, view.search.Rows())
+			}
+		}
+	}
+}
+
 func newFilterableWorktreeView(worktrees []git.Worktree) *WorktreeView {
-	filter := textinput.New()
-	filter.Placeholder = "Filter worktrees..."
 	branchInput := textinput.New()
-	return &WorktreeView{
+	view := &WorktreeView{
 		worktrees:   worktrees,
 		mode:        WorktreeModeList,
-		filter:      filter,
+		search:      newSearchController("branches, paths, commits, repository"),
 		branchInput: branchInput,
 	}
+	view.rebuildSearch()
+	return view
 }
 
 func keyMsg(key string) tea.KeyMsg {

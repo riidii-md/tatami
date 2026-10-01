@@ -24,9 +24,7 @@ func TestListViewShowsCachedRemoteSessionsWithEndpointIdentity(t *testing.T) {
 	if !strings.Contains(view.View(), "Tatami · Workbox") || !strings.Contains(view.View(), "same") {
 		t.Fatalf("hub not rendered: %s", view.View())
 	}
-	view.filtering = true
-	view.filter.SetValue("workbox")
-	view.refreshItems()
+	typeListQuery(view, "workbox")
 	if got := view.Selected(); got == nil || got.Endpoint == nil || got.Endpoint.ID != "work" {
 		t.Fatalf("filtered selection = %#v", got)
 	}
@@ -143,11 +141,15 @@ func TestHubFilterIncludesLocalAndRemoteSessions(t *testing.T) {
 	store := newTestStore(t, &workspace.Workspace{Name: "local", Path: t.TempDir()})
 	view := NewListViewWithHerdrSessions(store, func() ([]shell.HerdrSession, error) { return []shell.HerdrSession{{Name: "local-match"}}, nil })
 	view.SetHerdrHubSnapshots([]herdrhub.Endpoint{{ID: "work", Label: "Work", Target: "work"}}, []herdrhub.Snapshot{{EndpointID: "work", Sessions: []herdrhub.Session{{SessionKey: herdrhub.SessionKey{EndpointID: "work", SessionName: "remote-match"}}}}})
-	view.filtering = true
-	view.filter.SetValue("match")
-	view.refreshItems()
+	typeListQuery(view, "match")
 	if len(view.items) != 2 {
 		t.Fatalf("filter items=%#v", view.items)
+	}
+}
+
+func typeListQuery(view *ListView, query string) {
+	for _, r := range query {
+		view.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
 }
 
@@ -231,6 +233,7 @@ func TestMobileHomeNumbersSelectVisibleItemsAndUseCompactRows(t *testing.T) {
 		t.Fatalf("mobile list still renders project paths:\n%s", view)
 	}
 
+	list.Update(tea.KeyMsg{Type: tea.KeyDown})
 	list.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
 	selected := list.Selected()
 	if selected == nil || selected.Name != "second-project" {
@@ -283,7 +286,7 @@ func TestHomeUsesReportedTerminalHeight(t *testing.T) {
 			for lastContentRow >= 0 && strings.TrimSpace(lines[lastContentRow]) == "" {
 				lastContentRow--
 			}
-			if got := lines[lastContentRow]; !strings.Contains(got, "[q]uit") || lastContentRow < 38 {
+			if got := lines[lastContentRow]; !strings.Contains(got, "[type]search") || lastContentRow < 38 {
 				t.Fatalf("last content row = %d (%q); want bottom-anchored help", lastContentRow, got)
 			}
 		})
@@ -377,6 +380,7 @@ func TestMobileHomeNumbersReferToCurrentHeightBasedPage(t *testing.T) {
 	list := NewListViewWithHerdrSessions(store, nil)
 	list.SetMobileMode(true)
 	list.SetSize(80, 24)
+	list.Update(tea.KeyMsg{Type: tea.KeyDown})
 	list.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
 	start, end := list.visibleRange()
 	want := ""

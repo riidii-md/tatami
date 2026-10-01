@@ -68,6 +68,50 @@ func TestBuildInventoryExportsFullNavigationWithoutSecretsOrCommands(t *testing.
 	}
 }
 
+func TestInventoryRepositoryIdentityIsOptionalValidatedAndVersionOneCompatible(t *testing.T) {
+	workspaces := []workspace.Workspace{{Name: "API", Path: "/srv/api"}}
+	inventory, err := BuildInventoryWithRepositories("host", workspaces, nil, nil, map[string]string{
+		"/srv/api": "github.com/riidii/tatami",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inventory.Version != 1 || inventory.Workspaces[0].Repository != "github.com/riidii/tatami" {
+		t.Fatalf("inventory = %#v", inventory)
+	}
+	encoded, err := json.Marshal(inventory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var oldReader struct {
+		Kind       string `json:"kind"`
+		Version    int    `json:"version"`
+		Workspaces []struct {
+			Name string `json:"name"`
+		} `json:"workspaces"`
+	}
+	if err := json.Unmarshal(encoded, &oldReader); err != nil || oldReader.Version != 1 || oldReader.Workspaces[0].Name != "API" {
+		t.Fatalf("old reader = %#v err=%v", oldReader, err)
+	}
+	withoutRepository := `{"kind":"tatami.hub.inventory","version":1,"host":"host","workspaces":[{"name":"API","path":"/srv/api"}]}`
+	parsed, err := ParseInventory([]byte(withoutRepository))
+	if err != nil || parsed.Workspaces[0].Repository != "" {
+		t.Fatalf("old payload = %#v err=%v", parsed, err)
+	}
+	for _, unsafe := range []string{
+		"https://user:secret@github.com/org/repo",
+		"file:/private/alice/org/repo",
+		"https%3A%2F%2Fuser%3Asecret%40github.com/org/repo",
+		"github.com/org/repo?token=secret",
+		"../org/repo",
+	} {
+		_, err := BuildInventoryWithRepositories("host", workspaces, nil, nil, map[string]string{"/srv/api": unsafe})
+		if err == nil || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), unsafe) {
+			t.Fatalf("unsafe repository %q error = %v", unsafe, err)
+		}
+	}
+}
+
 func TestParseInventoryRejectsUnsupportedUnsafeAndOversizedData(t *testing.T) {
 	valid := `{"kind":"tatami.hub.inventory","version":1,"host":"bastion","workspaces":[{"name":"API","path":"/srv/api","folder":"work"}],"sessions":[{"name":"agents","running":true}],"hosts":[{"id":"macmini","label":"Mac Mini","target":"macmini"}]}`
 	inventory, err := ParseInventory([]byte(valid))
@@ -75,12 +119,14 @@ func TestParseInventoryRejectsUnsupportedUnsafeAndOversizedData(t *testing.T) {
 		t.Fatalf("valid inventory = %#v err=%v", inventory, err)
 	}
 	for name, payload := range map[string]string{
-		"version":   `{"kind":"tatami.hub.inventory","version":2,"host":"bastion"}`,
-		"kind":      `{"kind":"other","version":1,"host":"bastion"}`,
-		"workspace": `{"kind":"tatami.hub.inventory","version":1,"host":"bastion","workspaces":[{"name":"bad\u001b[2J","path":"/srv"}]}`,
-		"session":   `{"kind":"tatami.hub.inventory","version":1,"host":"bastion","sessions":[{"name":"bad;touch"}]}`,
-		"host":      `{"kind":"tatami.hub.inventory","version":1,"host":"bastion","hosts":[{"id":"bad","label":"Bad","target":"-oProxyCommand=x"}]}`,
-		"jump":      `{"kind":"tatami.hub.inventory","version":1,"host":"bastion","workspaces":[{"name":"DB","path":"/srv/db","target":"db","jump":["-oProxyCommand=x"]}]}`,
+		"version":            `{"kind":"tatami.hub.inventory","version":2,"host":"bastion"}`,
+		"kind":               `{"kind":"other","version":1,"host":"bastion"}`,
+		"workspace":          `{"kind":"tatami.hub.inventory","version":1,"host":"bastion","workspaces":[{"name":"bad\u001b[2J","path":"/srv"}]}`,
+		"session":            `{"kind":"tatami.hub.inventory","version":1,"host":"bastion","sessions":[{"name":"bad;touch"}]}`,
+		"host":               `{"kind":"tatami.hub.inventory","version":1,"host":"bastion","hosts":[{"id":"bad","label":"Bad","target":"-oProxyCommand=x"}]}`,
+		"jump":               `{"kind":"tatami.hub.inventory","version":1,"host":"bastion","workspaces":[{"name":"DB","path":"/srv/db","target":"db","jump":["-oProxyCommand=x"]}]}`,
+		"repository":         `{"kind":"tatami.hub.inventory","version":1,"host":"bastion","workspaces":[{"name":"DB","path":"/srv/db","repository":"https://user:secret@example.com/org/repo"}]}`,
+		"encoded repository": `{"kind":"tatami.hub.inventory","version":1,"host":"bastion","workspaces":[{"name":"DB","path":"/srv/db","repository":"https%3A%2F%2Fuser%3Asecret%40example.com/org/repo"}]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := ParseInventory([]byte(payload)); err == nil {

@@ -6,10 +6,12 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/OleksandrBesan/tatami/internal/git"
 	"github.com/OleksandrBesan/tatami/internal/herdrhub"
+	appsearch "github.com/OleksandrBesan/tatami/internal/search"
 	"github.com/OleksandrBesan/tatami/internal/shell"
 	"github.com/OleksandrBesan/tatami/internal/systemusage"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
@@ -81,6 +83,12 @@ type herdrHubCacheSaver func(herdrhub.Cache) error
 type herdrHubEndpointSaver func([]herdrhub.Endpoint) error
 type herdrHubAgentQuery func(context.Context, herdrhub.Endpoint, string) ([]herdrhub.Agent, error)
 type herdrHubInteractiveInventory func(context.Context, herdrhub.Endpoint, io.Reader, io.Writer) (herdrhub.Snapshot, error)
+type repositoryIdentityResolver func(context.Context, string) (git.RepositoryIdentity, error)
+
+type searchTouchTarget struct {
+	view  View
+	rowID appsearch.ID
+}
 
 // WithHerdrHubSnapshots renders safe cached remote inventory immediately.
 func WithHerdrHubSnapshots(endpoints []herdrhub.Endpoint, snapshots []herdrhub.Snapshot) AppOption {
@@ -99,6 +107,10 @@ func WithHerdrHubAgentQuery(query herdrHubAgentQuery) AppOption {
 }
 func WithHerdrHubInteractiveInventory(query herdrHubInteractiveInventory) AppOption {
 	return func(a *App) { a.herdrHubInteractiveInventory = query }
+}
+
+func WithRepositoryIdentityResolver(resolve repositoryIdentityResolver) AppOption {
+	return func(a *App) { a.repositoryIdentityResolver = resolve }
 }
 
 // WithNewTabMode adapts workspace actions for a dedicated terminal tab. The
@@ -191,6 +203,10 @@ type App struct {
 	herdrHubAgentGeneration      uint64
 	herdrHubAgentCancel          context.CancelFunc
 	herdrHostDeleteView          *HerdrHostDeleteView
+	repositoryIdentityResolver   repositoryIdentityResolver
+	repositoryGeneration         uint64
+	repositoryIdentities         map[string]string
+	searchTouchRows              map[int]searchTouchTarget
 }
 
 // NewApp creates a new App
@@ -199,6 +215,7 @@ func NewApp(store *workspace.Store, options ...AppOption) *App {
 	tmux := shell.NewTmuxRunner()
 
 	herdrRunner := shell.NewHerdrRunner()
+	repositoryResolver := git.NewRepositoryResolver(4)
 	app := &App{
 		store:                      store,
 		zellij:                     zellij,
@@ -210,6 +227,8 @@ func NewApp(store *workspace.Store, options ...AppOption) *App {
 		herdrSessionStopper:        herdrRunner.StopSession,
 		herdrSessionDeleter:        herdrRunner.DeleteSession,
 		herdrSessionUsageCollector: systemusage.CollectHerdrSession,
+		repositoryIdentityResolver: repositoryResolver.Resolve,
+		repositoryIdentities:       make(map[string]string),
 	}
 	for _, option := range options {
 		option(app)
@@ -219,6 +238,7 @@ func NewApp(store *workspace.Store, options ...AppOption) *App {
 	app.listView.SetInZellij(zellij.IsInsideSession())
 	app.applyMobileMode(app.listView)
 	app.applyMobileMode(app.createView)
+	app.applyMobileMode(app.layoutEditor)
 	return app
 }
 
@@ -233,7 +253,50 @@ func (a *App) Result() *Result {
 
 // Init implements tea.Model
 func (a *App) Init() tea.Cmd {
-	return batchCommands(a.scheduleSelectedHerdrUsage(), a.scheduleHubRefresh(a.remoteHubEndpoints()), a.scheduleSelectedHubAgents())
+	return batchCommands(a.scheduleSelectedHerdrUsage(), a.scheduleHubRefresh(a.remoteHubEndpoints()), a.scheduleSelectedHubAgents(), a.scheduleRepositoryIdentities())
+}
+
+type repositoryIdentitiesMsg struct {
+	Generation uint64
+	Values     map[string]string
+}
+
+func (a *App) scheduleRepositoryIdentities() tea.Cmd {
+	if a.repositoryIdentityResolver == nil {
+		return nil
+	}
+	a.repositoryGeneration++
+	generation := a.repositoryGeneration
+	paths := make([]string, 0, len(a.store.List()))
+	for _, saved := range a.store.List() {
+		if !saved.IsRemote() && strings.TrimSpace(saved.Path) != "" {
+			paths = append(paths, saved.Path)
+		}
+	}
+	resolve := a.repositoryIdentityResolver
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		values := make(map[string]string)
+		var mu sync.Mutex
+		var wait sync.WaitGroup
+		for _, path := range paths {
+			path := path
+			wait.Add(1)
+			go func() {
+				defer wait.Done()
+				identity, err := resolve(ctx, path)
+				if err != nil || identity.Display == "" {
+					return
+				}
+				mu.Lock()
+				values[path] = identity.Display
+				mu.Unlock()
+			}()
+		}
+		wait.Wait()
+		return repositoryIdentitiesMsg{Generation: generation, Values: values}
+	}
 }
 
 type herdrHubAgentsResultMsg struct {
@@ -355,6 +418,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.width = msg.Width
 		a.height = msg.Height
 		a.listView.SetSize(msg.Width, msg.Height)
+		a.setSearchHeights(msg.Height)
 		if resized {
 			return a, tea.ClearScreen
 		}
@@ -369,6 +433,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if err := a.herdrHubCacheSaver(herdrhub.Cache{Snapshots: a.hubSnapshots}); err != nil {
 				a.err = err
 			}
+		}
+		return a, nil
+	case repositoryIdentitiesMsg:
+		if msg.Generation != a.repositoryGeneration {
+			return a, nil
+		}
+		a.repositoryIdentities = msg.Values
+		a.listView.SetRepositoryIdentities(msg.Values)
+		if a.worktreeView != nil && a.actionsView != nil && a.actionsView.Workspace() != nil {
+			path := a.actionsView.Workspace().Path
+			a.worktreeView.SetRepositoryIdentity(msg.Values[path])
 		}
 		return a, nil
 	case herdrHubAgentsResultMsg:
@@ -443,9 +518,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// View-specific handling
 		switch a.currentView {
 		case ViewList:
-			before := a.selectedHerdrUsageKey()
 			model, cmd := a.updateList(msg)
-			if before != a.selectedHerdrUsageKey() {
+			if a.listView.consumeBrowseSelectionChanged() {
 				cmd = batchCommands(cmd, a.scheduleSelectedHerdrUsage(), a.scheduleSelectedHubAgents())
 			}
 			return model, cmd
@@ -512,6 +586,12 @@ func (a *App) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 		return a.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	}
+	if target, ok := a.searchTouchRows[event.Y]; ok && target.view == a.currentView {
+		if !a.selectSearchableRow(target.rowID) {
+			return a, nil
+		}
+		return a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	}
 	if !a.currentViewSupportsNumberedTap() {
 		return a, nil
 	}
@@ -529,20 +609,82 @@ func (a *App) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return model, batchCommands(selectCmd, enterCmd)
 }
 
+func (a *App) selectSearchableRow(rowID appsearch.ID) bool {
+	selected := false
+	switch a.currentView {
+	case ViewActions:
+		selected = a.actionsView.search.SelectRowID(rowID).Consumed
+		a.actionsView.cursor = a.actionsView.search.ActiveIndex()
+	case ViewTemplates:
+		selected = a.templateView.search.SelectRowID(rowID).Consumed
+	case ViewWorktree:
+		if a.worktreeView.Mode() != WorktreeModeList {
+			return false
+		}
+		selected = a.worktreeView.search.SelectRowID(rowID).Consumed
+		a.worktreeView.cursor = a.worktreeView.search.ActiveIndex()
+	case ViewWorktreeActions:
+		selected = a.worktreeActionView.search.SelectRowID(rowID).Consumed
+		a.worktreeActionView.cursor = a.worktreeActionView.search.ActiveIndex()
+	case ViewSessions:
+		if a.sessionView.Mode() != SessionModeList {
+			return false
+		}
+		selected = a.sessionView.search.SelectRowID(rowID).Consumed
+		a.sessionView.cursor = a.sessionView.search.ActiveIndex()
+	case ViewHerdrOpenMode:
+		selected = a.herdrOpenModeView.search.SelectRowID(rowID).Consumed
+		a.herdrOpenModeView.cursor = a.herdrOpenModeView.search.ActiveIndex()
+	case ViewHerdrSessionPicker:
+		selected = a.herdrSessionPickerView.search.SelectRowID(rowID).Consumed
+		a.herdrSessionPickerView.cursor = a.herdrSessionPickerView.search.ActiveIndex()
+	case ViewLayout:
+		if a.layoutEditor.IsEditing() {
+			return false
+		}
+		selected = a.layoutEditor.search.SelectRowID(rowID).Consumed
+		a.layoutEditor.syncCursorFromSearch()
+	default:
+		return false
+	}
+	return selected
+}
+
 func (a *App) currentViewSupportsNumberedTap() bool {
 	switch a.currentView {
-	case ViewActions,
-		ViewTemplates,
-		ViewWorktree,
-		ViewWorktreeActions,
-		ViewSessions,
-		ViewHerdrOpenMode,
-		ViewHerdrSessionPicker,
-		ViewHerdrSessionDelete,
+	case ViewHerdrSessionDelete,
 		ViewHerdrHostDelete:
 		return true
 	default:
 		return false
+	}
+}
+
+func (a *App) setSearchHeights(height int) {
+	controllers := []*searchController{&a.layoutEditor.search}
+	if a.actionsView != nil {
+		controllers = append(controllers, &a.actionsView.search)
+	}
+	if a.templateView != nil {
+		controllers = append(controllers, &a.templateView.search)
+	}
+	if a.worktreeView != nil {
+		controllers = append(controllers, &a.worktreeView.search)
+	}
+	if a.worktreeActionView != nil {
+		controllers = append(controllers, &a.worktreeActionView.search)
+	}
+	if a.sessionView != nil {
+		controllers = append(controllers, &a.sessionView.search)
+	}
+	if a.herdrOpenModeView != nil {
+		controllers = append(controllers, &a.herdrOpenModeView.search)
+	}
+	if a.herdrSessionPickerView != nil {
+		controllers = append(controllers, &a.herdrSessionPickerView.search)
+	}
+	for _, controller := range controllers {
+		controller.SetHeight(height)
 	}
 }
 
@@ -648,7 +790,11 @@ func (a *App) handleMobileBack(msg tea.KeyMsg) (bool, tea.Model, tea.Cmd) {
 			return true, a, nil
 		}
 	case ViewActions, ViewTemplates, ViewWorktreeActions, ViewSessions,
-		ViewHerdrOpenMode, ViewHerdrSessionPicker, ViewHerdrSessionDelete, ViewHerdrHostDelete:
+		ViewHerdrOpenMode, ViewHerdrSessionPicker:
+		if a.currentSearchInQueryFocus() {
+			return false, a, nil
+		}
+	case ViewHerdrSessionDelete, ViewHerdrHostDelete:
 	case ViewWorktree:
 		if a.worktreeView == nil || a.worktreeView.Mode() == WorktreeModeCreate || a.worktreeView.IsFiltering() {
 			return false, a, nil
@@ -659,6 +805,29 @@ func (a *App) handleMobileBack(msg tea.KeyMsg) (bool, tea.Model, tea.Cmd) {
 
 	model, cmd := a.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	return true, model, cmd
+}
+
+func (a *App) currentSearchInQueryFocus() bool {
+	switch a.currentView {
+	case ViewList:
+		return a.listView.search.InQueryFocus()
+	case ViewActions:
+		return a.actionsView.search.InQueryFocus()
+	case ViewTemplates:
+		return a.templateView.search.InQueryFocus()
+	case ViewWorktree:
+		return a.worktreeView != nil && a.worktreeView.Mode() == WorktreeModeList && a.worktreeView.search.InQueryFocus()
+	case ViewWorktreeActions:
+		return a.worktreeActionView.search.InQueryFocus()
+	case ViewSessions:
+		return a.sessionView.Mode() == SessionModeList && a.sessionView.search.InQueryFocus()
+	case ViewHerdrOpenMode:
+		return a.herdrOpenModeView.search.InQueryFocus()
+	case ViewHerdrSessionPicker:
+		return a.herdrSessionPickerView.search.InQueryFocus()
+	default:
+		return false
+	}
 }
 
 func (a *App) updateFolderInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -686,18 +855,12 @@ func (a *App) updateFolderInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (a *App) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Handle filter mode
-	if a.listView.IsFiltering() {
-		switch msg.String() {
-		case "enter":
-			a.listView.StopFiltering()
-			return a, nil
-		case "esc":
-			a.listView.ClearFilter()
-			return a, nil
-		default:
-			return a, a.listView.Update(msg)
+	event, cmd := a.listView.handleKey(msg)
+	if event.Consumed {
+		if event.Activate {
+			return a.activateListSelection()
 		}
+		return a, cmd
 	}
 
 	switch msg.String() {
@@ -737,43 +900,7 @@ func (a *App) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, tea.Quit
 
 	case "enter", "l":
-		item := a.listView.Selected()
-		if item == nil {
-			return a, nil
-		}
-		switch item.Type {
-		case "herdr_endpoint":
-			if item.Endpoint != nil {
-				if item.Endpoint.ID != herdrhub.LocalEndpointID {
-					for _, snapshot := range a.hubSnapshots {
-						if snapshot.EndpointID == item.Endpoint.Key() && snapshot.State == herdrhub.StateOnline {
-							a.listView.ExpandHerdrEndpoint(item.Endpoint.Key())
-							return a, nil
-						}
-					}
-					return a, a.scheduleInteractiveHerdrInventory(*item.Endpoint)
-				}
-				a.listView.ToggleHerdrEndpoint(item.Endpoint.Key())
-			}
-		case "folder":
-			a.listView.EnterFolder(item.Name)
-		case "workspace":
-			a.actionsView = NewActionView(item.Workspace, a.zellij.IsInsideSession(), a.tmux.IsInsideSession(), a.newTabMode)
-			a.applyMobileMode(a.actionsView)
-			a.currentView = ViewActions
-		case "herdr_session":
-			a.result = &Result{
-				Action:      ActionAttachHerdrSession,
-				SessionName: item.Herdr.Name,
-			}
-			if item.Endpoint != nil {
-				a.result.HerdrEndpointID = item.Endpoint.Key()
-				a.result.HerdrTarget = item.Endpoint.Target
-				a.result.HerdrVia = append([]string(nil), item.Endpoint.Via...)
-			}
-			return a, tea.Quit
-		}
-		return a, nil
+		return a.activateListSelection()
 
 	case "n":
 		a.createView.Reset()
@@ -867,6 +994,50 @@ func (a *App) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	default:
 		return a, a.listView.Update(msg)
 	}
+}
+
+func (a *App) activateListSelection() (tea.Model, tea.Cmd) {
+	item := a.listView.Selected()
+	if item == nil {
+		return a, nil
+	}
+	switch item.Type {
+	case "herdr_endpoint":
+		if item.Endpoint != nil {
+			if item.Endpoint.ID != herdrhub.LocalEndpointID {
+				for _, snapshot := range a.hubSnapshots {
+					if snapshot.EndpointID == item.Endpoint.Key() && snapshot.State == herdrhub.StateOnline {
+						a.listView.ExpandHerdrEndpoint(item.Endpoint.Key())
+						return a, nil
+					}
+				}
+				return a, a.scheduleInteractiveHerdrInventory(*item.Endpoint)
+			}
+			a.listView.ToggleHerdrEndpoint(item.Endpoint.Key())
+		}
+	case "folder":
+		if item.FolderPath != "" {
+			a.listView.SetCurrentFolder(item.FolderPath)
+		} else {
+			a.listView.EnterFolder(item.Name)
+		}
+	case "workspace":
+		a.actionsView = NewActionView(item.Workspace, a.zellij.IsInsideSession(), a.tmux.IsInsideSession(), a.newTabMode)
+		a.applyMobileMode(a.actionsView)
+		a.currentView = ViewActions
+	case "herdr_session":
+		a.result = &Result{
+			Action:      ActionAttachHerdrSession,
+			SessionName: item.Herdr.Name,
+		}
+		if item.Endpoint != nil {
+			a.result.HerdrEndpointID = item.Endpoint.Key()
+			a.result.HerdrTarget = item.Endpoint.Target
+			a.result.HerdrVia = append([]string(nil), item.Endpoint.Via...)
+		}
+		return a, tea.Quit
+	}
+	return a, nil
 }
 
 func (a *App) updateHerdrHost(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -989,7 +1160,7 @@ func (a *App) updateCreate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		a.listView.Refresh()
 		a.currentView = ViewList
-		return a, nil
+		return a, a.scheduleRepositoryIdentities()
 
 	case "ctrl+l":
 		// Open layout editor
@@ -1012,55 +1183,60 @@ func (a *App) updateCreate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (a *App) updateActions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc", "q":
+	event, cmd := a.actionsView.handleKey(msg)
+	if event.Consumed {
+		if event.Activate {
+			return a.activateActionSelection()
+		}
+		return a, cmd
+	}
+	if msg.String() == "esc" || msg.String() == "q" {
 		a.currentView = ViewList
 		return a, nil
-
-	case "enter":
-		action := a.actionsView.Selected()
-		ws := a.actionsView.Workspace()
-
-		// If template action, show template picker
-		if action == ActionWithTemplate {
-			a.templateView = NewTemplateView()
-			a.applyMobileMode(a.templateView)
-			a.previousView = ViewActions
-			a.currentView = ViewTemplates
-			return a, nil
-		}
-
-		// If worktree action, show worktree picker
-		if action == ActionWorktree {
-			a.worktreeView = NewWorktreeView(ws.Path)
-			a.applyMobileMode(a.worktreeView)
-			a.currentView = ViewWorktree
-			return a, nil
-		}
-
-		result := &Result{
-			Action:    action,
-			Workspace: ws,
-		}
-		if ws.Layout.Type == workspace.LayoutHerdr {
-			a.beginHerdrOpen(result, ViewActions)
-			return a, nil
-		}
-		a.result = result
-		return a, tea.Quit
-
-	default:
-		return a, a.actionsView.Update(msg)
 	}
+	return a, a.actionsView.Update(msg)
+}
+
+func (a *App) activateActionSelection() (tea.Model, tea.Cmd) {
+	action := a.actionsView.Selected()
+	ws := a.actionsView.Workspace()
+	if action == ActionWithTemplate {
+		a.templateView = NewTemplateView()
+		a.applyMobileMode(a.templateView)
+		a.previousView = ViewActions
+		a.currentView = ViewTemplates
+		return a, nil
+	}
+	if action == ActionWorktree {
+		a.worktreeView = a.newWorktreeView(ws)
+		a.applyMobileMode(a.worktreeView)
+		a.currentView = ViewWorktree
+		return a, nil
+	}
+	result := &Result{Action: action, Workspace: ws}
+	if ws.Layout.Type == workspace.LayoutHerdr {
+		a.beginHerdrOpen(result, ViewActions)
+		return a, nil
+	}
+	a.result = result
+	return a, tea.Quit
 }
 
 func (a *App) updateLayout(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		if a.layoutEditor.IsEditing() {
-			// Cancel pane edit
-			return a, a.layoutEditor.Update(msg)
+	if a.layoutEditor.IsEditing() {
+		return a, a.layoutEditor.Update(msg)
+	}
+	if msg.String() == "ctrl+n" {
+		return a, a.layoutEditor.Update(msg)
+	}
+	event, cmd := a.layoutEditor.handleKey(msg)
+	if event.Consumed {
+		if event.Activate {
+			a.layoutEditor.startEdit()
 		}
+		return a, cmd
+	}
+	if msg.String() == "esc" {
 		// Save panes and go back
 		ws := a.createView.GetWorkspace()
 		ws.Layout.Panes = a.layoutEditor.GetPanes()
@@ -1068,46 +1244,55 @@ func (a *App) updateLayout(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.createView.editing = true // Keep edit mode
 		a.currentView = ViewCreate
 		return a, nil
-
-	default:
-		return a, a.layoutEditor.Update(msg)
 	}
+	return a, a.layoutEditor.Update(msg)
 }
 
 func (a *App) updateTemplates(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc", "q":
-		a.currentView = a.previousView
+	event, cmd := a.templateView.handleKey(msg)
+	if !event.Consumed {
+		switch msg.String() {
+		case "esc", "q":
+			a.currentView = a.previousView
+			return a, nil
+		default:
+			return a, a.templateView.Update(msg)
+		}
+	}
+	if !event.Activate {
+		return a, cmd
+	}
+
+	tmpl := a.templateView.Selected()
+	if tmpl == nil {
+		return a, cmd
+	}
+
+	switch {
+	case a.previousView == ViewCreate:
+		// If came from create view, apply template and go back
+		a.createView.ApplyTemplate(tmpl)
+		a.currentView = ViewCreate
 		return a, nil
 
-	case "enter":
-		tmpl := a.templateView.Selected()
-
-		// If came from create view, apply template and go back
-		if a.previousView == ViewCreate {
-			a.createView.ApplyTemplate(tmpl)
-			a.currentView = ViewCreate
+	case a.previousView == ViewWorktreeActions:
+		// If came from worktree actions view, execute worktree with template
+		ws := a.worktreeActionView.Workspace()
+		wt := a.worktreeActionView.Worktree()
+		result := &Result{
+			Action:    ActionWorktree,
+			Workspace: ws,
+			Worktree:  wt,
+			Template:  tmpl,
+		}
+		if ws.Layout.Type == workspace.LayoutHerdr {
+			a.beginHerdrOpen(result, ViewTemplates)
 			return a, nil
 		}
+		a.result = result
+		return a, tea.Quit
 
-		// If came from worktree actions view, execute worktree with template
-		if a.previousView == ViewWorktreeActions {
-			ws := a.worktreeActionView.Workspace()
-			wt := a.worktreeActionView.Worktree()
-			result := &Result{
-				Action:    ActionWorktree,
-				Workspace: ws,
-				Worktree:  wt,
-				Template:  tmpl,
-			}
-			if ws.Layout.Type == workspace.LayoutHerdr {
-				a.beginHerdrOpen(result, ViewTemplates)
-				return a, nil
-			}
-			a.result = result
-			return a, tea.Quit
-		}
-
+	default:
 		// If came from actions view, execute with template
 		ws := a.actionsView.Workspace()
 		result := &Result{
@@ -1121,17 +1306,16 @@ func (a *App) updateTemplates(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		a.result = result
 		return a, tea.Quit
-
-	default:
-		return a, a.templateView.Update(msg)
 	}
 }
 
 func (a *App) updateWorktree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc", "q":
-		// Only go back if in list mode
-		if a.worktreeView.Mode() == WorktreeModeList && !a.worktreeView.IsFiltering() {
+	if a.worktreeView.Mode() == WorktreeModeList {
+		if msg.String() == "esc" && a.worktreeView.search.Query() == "" {
+			a.currentView = ViewActions
+			return a, nil
+		}
+		if msg.String() == "q" && !a.worktreeView.search.InQueryFocus() {
 			a.currentView = ViewActions
 			return a, nil
 		}
@@ -1170,6 +1354,12 @@ func (a *App) updateWorktree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a, cmd
 }
 
+func (a *App) newWorktreeView(ws *workspace.Workspace) *WorktreeView {
+	view := NewWorktreeView(ws.Path)
+	view.SetRepositoryIdentity(a.repositoryIdentities[ws.Path])
+	return view
+}
+
 func (a *App) beginHerdrOpen(result *Result, backView View) {
 	a.pendingHerdrResult = result
 	a.herdrOpenBackView = backView
@@ -1195,40 +1385,47 @@ func (a *App) openRemoteHerdrSessionPicker(endpoint herdrhub.Endpoint, sessions 
 }
 
 func (a *App) updateHerdrOpenMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc", "q":
+	event, cmd := a.herdrOpenModeView.handleKey(msg)
+	if !event.Consumed && (msg.String() == "esc" || msg.String() == "q") {
 		if a.herdrOpenBackView == ViewWorktree && a.actionsView != nil {
-			a.worktreeView = NewWorktreeView(a.actionsView.Workspace().Path)
+			a.worktreeView = a.newWorktreeView(a.actionsView.Workspace())
 			a.applyMobileMode(a.worktreeView)
 		}
 		a.pendingHerdrResult = nil
 		a.currentView = a.herdrOpenBackView
 		return a, nil
-	case "enter":
-		if a.pendingHerdrResult == nil {
-			a.err = fmt.Errorf("no pending Herdr workspace")
-			return a, nil
-		}
-		mode := a.herdrOpenModeView.Selected()
-		a.pendingHerdrResult.HerdrMode = mode
-		if mode == HerdrOpenExisting {
-			sessions, err := a.herdrSessionLister()
-			currentSession := ""
-			if os.Getenv("HERDR_ENV") == "1" {
-				currentSession = strings.TrimSpace(os.Getenv("HERDR_SESSION"))
-			}
-			a.herdrSessionPickerView = NewHerdrSessionPickerView(sessions, currentSession, err)
-			a.applyMobileMode(a.herdrSessionPickerView)
-			a.currentView = ViewHerdrSessionPicker
-			return a, nil
-		}
-		a.herdrSessionNameView = NewHerdrSessionNameView(defaultHerdrSessionName(a.pendingHerdrResult))
-		a.applyMobileMode(a.herdrSessionNameView)
-		a.currentView = ViewHerdrSessionName
-		return a, nil
-	default:
-		return a, a.herdrOpenModeView.Update(msg)
 	}
+	if event.Consumed {
+		if event.Activate {
+			return a.activateHerdrOpenMode()
+		}
+		return a, cmd
+	}
+	return a, a.herdrOpenModeView.Update(msg)
+}
+
+func (a *App) activateHerdrOpenMode() (tea.Model, tea.Cmd) {
+	if a.pendingHerdrResult == nil {
+		a.err = fmt.Errorf("no pending Herdr workspace")
+		return a, nil
+	}
+	mode := a.herdrOpenModeView.Selected()
+	a.pendingHerdrResult.HerdrMode = mode
+	if mode == HerdrOpenExisting {
+		sessions, err := a.herdrSessionLister()
+		currentSession := ""
+		if os.Getenv("HERDR_ENV") == "1" {
+			currentSession = strings.TrimSpace(os.Getenv("HERDR_SESSION"))
+		}
+		a.herdrSessionPickerView = NewHerdrSessionPickerView(sessions, currentSession, err)
+		a.applyMobileMode(a.herdrSessionPickerView)
+		a.currentView = ViewHerdrSessionPicker
+		return a, nil
+	}
+	a.herdrSessionNameView = NewHerdrSessionNameView(defaultHerdrSessionName(a.pendingHerdrResult))
+	a.applyMobileMode(a.herdrSessionNameView)
+	a.currentView = ViewHerdrSessionName
+	return a, nil
 }
 
 func defaultHerdrSessionName(result *Result) string {
@@ -1273,8 +1470,8 @@ func (a *App) updateHerdrSessionName(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (a *App) updateHerdrSessionPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc", "q":
+	event, cmd := a.herdrSessionPickerView.handleKey(msg)
+	if !event.Consumed && (msg.String() == "esc" || msg.String() == "q") {
 		if a.pendingHerdrResult != nil && a.pendingHerdrResult.Action == ActionAttachHerdrSession && a.pendingHerdrResult.HerdrEndpointID != "" {
 			a.pendingHerdrResult = nil
 			a.herdrSessionPickerView = nil
@@ -1283,27 +1480,34 @@ func (a *App) updateHerdrSessionPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		a.currentView = ViewHerdrOpenMode
 		return a, nil
-	case "enter":
-		if a.pendingHerdrResult == nil {
-			a.err = fmt.Errorf("no pending Herdr workspace")
-			return a, nil
+	}
+	if event.Consumed {
+		if event.Activate {
+			return a.activateHerdrSessionPicker()
 		}
-		session := a.herdrSessionPickerView.Selected()
-		if session == "" {
-			return a, nil
-		}
-		if a.pendingHerdrResult.Action == ActionAttachHerdrSession && a.pendingHerdrResult.HerdrEndpointID != "" {
-			a.pendingHerdrResult.SessionName = session
-			a.result = a.pendingHerdrResult
-			return a, tea.Quit
-		}
-		a.pendingHerdrResult.HerdrMode = HerdrOpenExisting
-		a.pendingHerdrResult.HerdrSessionName = session
+		return a, cmd
+	}
+	return a, a.herdrSessionPickerView.Update(msg)
+}
+
+func (a *App) activateHerdrSessionPicker() (tea.Model, tea.Cmd) {
+	if a.pendingHerdrResult == nil {
+		a.err = fmt.Errorf("no pending Herdr workspace")
+		return a, nil
+	}
+	session := a.herdrSessionPickerView.Selected()
+	if session == "" {
+		return a, nil
+	}
+	if a.pendingHerdrResult.Action == ActionAttachHerdrSession && a.pendingHerdrResult.HerdrEndpointID != "" {
+		a.pendingHerdrResult.SessionName = session
 		a.result = a.pendingHerdrResult
 		return a, tea.Quit
-	default:
-		return a, a.herdrSessionPickerView.Update(msg)
 	}
+	a.pendingHerdrResult.HerdrMode = HerdrOpenExisting
+	a.pendingHerdrResult.HerdrSessionName = session
+	a.result = a.pendingHerdrResult
+	return a, tea.Quit
 }
 
 func (a *App) updateHerdrSessionDelete(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1336,76 +1540,64 @@ func (a *App) updateHerdrSessionDelete(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (a *App) updateWorktreeActions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc", "q":
+	event, cmd := a.worktreeActionView.handleKey(msg)
+	if !event.Consumed && (msg.String() == "esc" || msg.String() == "q") {
 		// Reset worktree selection and go back to worktree list
-		a.worktreeView = NewWorktreeView(a.actionsView.Workspace().Path)
+		a.worktreeView = a.newWorktreeView(a.actionsView.Workspace())
 		a.applyMobileMode(a.worktreeView)
 		a.currentView = ViewWorktree
 		return a, nil
 
-	case "enter":
-		action := a.worktreeActionView.Selected()
-		ws := a.worktreeActionView.Workspace()
-		wt := a.worktreeActionView.Worktree()
-
-		switch action {
-		case WorktreeActionWithTemplate:
-			a.templateView = NewTemplateView()
-			a.applyMobileMode(a.templateView)
-			a.previousView = ViewWorktreeActions
-			a.currentView = ViewTemplates
-			return a, nil
-
-		case WorktreeActionWithLayout:
-			a.result = &Result{
-				Action:    ActionWorktree,
-				Workspace: ws,
-				Worktree:  wt,
-			}
-			return a, tea.Quit
-
-		case WorktreeActionPlain:
-			a.result = &Result{
-				Action:    ActionWorktree,
-				Workspace: ws,
-				Worktree:  wt,
-				Template:  &workspace.Template{}, // Empty template = plain
-			}
-			return a, tea.Quit
-		}
-
-	default:
-		return a, a.worktreeActionView.Update(msg)
 	}
+	if event.Consumed {
+		if event.Activate {
+			return a.activateWorktreeActionSelection()
+		}
+		return a, cmd
+	}
+	return a, a.worktreeActionView.Update(msg)
+}
 
-	return a, nil
+func (a *App) activateWorktreeActionSelection() (tea.Model, tea.Cmd) {
+	action := a.worktreeActionView.Selected()
+	ws := a.worktreeActionView.Workspace()
+	wt := a.worktreeActionView.Worktree()
+	switch action {
+	case WorktreeActionWithTemplate:
+		a.templateView = NewTemplateView()
+		a.applyMobileMode(a.templateView)
+		a.previousView = ViewWorktreeActions
+		a.currentView = ViewTemplates
+		return a, nil
+	case WorktreeActionWithLayout:
+		a.result = &Result{Action: ActionWorktree, Workspace: ws, Worktree: wt}
+		return a, tea.Quit
+	case WorktreeActionPlain:
+		a.result = &Result{Action: ActionWorktree, Workspace: ws, Worktree: wt, Template: &workspace.Template{}}
+		return a, tea.Quit
+	default:
+		return a, nil
+	}
 }
 
 func (a *App) updateSessions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc", "q":
-		// Only go back if in list mode
-		if a.sessionView.Mode() == SessionModeList {
+	if a.sessionView.Mode() == SessionModeList {
+		event, cmd := a.sessionView.handleKey(msg)
+		if event.Consumed {
+			if event.Activate && a.sessionView.CanAttach() {
+				sessionName := a.sessionView.Selected()
+				if sessionName != "" && !a.sessionView.IsCurrentSession() {
+					a.result = &Result{Action: ActionAttachSession, SessionName: sessionName}
+					return a, tea.Quit
+				}
+			}
+			return a, cmd
+		}
+		if msg.String() == "esc" || msg.String() == "q" {
 			a.currentView = ViewList
 			return a, nil
 		}
-
-	case "enter":
-		// Attach to selected session (only if allowed and not current)
-		if a.sessionView.Mode() == SessionModeList && a.sessionView.CanAttach() {
-			sessionName := a.sessionView.Selected()
-			if sessionName != "" && !a.sessionView.IsCurrentSession() {
-				a.result = &Result{
-					Action:      ActionAttachSession,
-					SessionName: sessionName,
-				}
-				return a, tea.Quit
-			}
-		}
 	}
-
-	// Let session view handle the input
 	return a, a.sessionView.Update(msg)
 }
 
@@ -1415,38 +1607,105 @@ func (a *App) View() string {
 		return errorStyle.Render(fmt.Sprintf("Error: %v", a.err))
 	}
 
+	if controller := a.currentSearchController(); controller != nil {
+		controller.SetHeight(a.height)
+	}
+	var rendered string
 	switch a.currentView {
 	case ViewList:
-		return a.listView.View()
+		rendered = a.listView.View()
 	case ViewCreate:
-		return a.createView.View()
+		rendered = a.createView.View()
 	case ViewActions:
-		return a.actionsView.View()
+		rendered = a.actionsView.View()
 	case ViewLayout:
-		return boxStyle.Render(a.layoutEditor.View())
+		rendered = boxStyle.Render(a.layoutEditor.View())
 	case ViewTemplates:
-		return a.templateView.View()
+		rendered = a.templateView.View()
 	case ViewFolderInput:
-		return a.folderInput.View()
+		rendered = a.folderInput.View()
 	case ViewWorktree:
-		return a.worktreeView.View()
+		rendered = a.worktreeView.View()
 	case ViewWorktreeActions:
-		return a.worktreeActionView.View()
+		rendered = a.worktreeActionView.View()
 	case ViewSessions:
-		return a.sessionView.View()
+		rendered = a.sessionView.View()
 	case ViewHerdrOpenMode:
-		return a.herdrOpenModeView.View()
+		rendered = a.herdrOpenModeView.View()
 	case ViewHerdrSessionName:
-		return a.herdrSessionNameView.View()
+		rendered = a.herdrSessionNameView.View()
 	case ViewHerdrSessionPicker:
-		return a.herdrSessionPickerView.View()
+		rendered = a.herdrSessionPickerView.View()
 	case ViewHerdrSessionDelete:
-		return a.herdrSessionDeleteView.View()
+		rendered = a.herdrSessionDeleteView.View()
 	case ViewHerdrHost:
-		return a.herdrHostView.View()
+		rendered = a.herdrHostView.View()
 	case ViewHerdrHostDelete:
-		return a.herdrHostDeleteView.View()
+		rendered = a.herdrHostDeleteView.View()
 	default:
-		return ""
+		rendered = ""
+	}
+	a.recordSearchTouchRows(rendered)
+	return rendered
+}
+
+func (a *App) currentSearchController() *searchController {
+	switch a.currentView {
+	case ViewActions:
+		if a.actionsView != nil {
+			return &a.actionsView.search
+		}
+	case ViewLayout:
+		if a.layoutEditor != nil && !a.layoutEditor.IsEditing() {
+			return &a.layoutEditor.search
+		}
+	case ViewTemplates:
+		if a.templateView != nil {
+			return &a.templateView.search
+		}
+	case ViewWorktree:
+		if a.worktreeView != nil && a.worktreeView.Mode() == WorktreeModeList {
+			return &a.worktreeView.search
+		}
+	case ViewWorktreeActions:
+		if a.worktreeActionView != nil {
+			return &a.worktreeActionView.search
+		}
+	case ViewSessions:
+		if a.sessionView != nil && a.sessionView.Mode() == SessionModeList {
+			return &a.sessionView.search
+		}
+	case ViewHerdrOpenMode:
+		if a.herdrOpenModeView != nil {
+			return &a.herdrOpenModeView.search
+		}
+	case ViewHerdrSessionPicker:
+		if a.herdrSessionPickerView != nil {
+			return &a.herdrSessionPickerView.search
+		}
+	}
+	return nil
+}
+
+func (a *App) recordSearchTouchRows(rendered string) {
+	a.searchTouchRows = make(map[int]searchTouchTarget)
+	if !a.mobileMode {
+		return
+	}
+	controller := a.currentSearchController()
+	if controller == nil {
+		return
+	}
+	lines := strings.Split(rendered, "\n")
+	for row := range lines {
+		choice, ok := numberedChoiceAtRow(rendered, row)
+		if !ok {
+			continue
+		}
+		index := controller.visibleStart + int(choice-'1')
+		if index < 0 || index >= len(controller.rows) {
+			continue
+		}
+		a.searchTouchRows[row] = searchTouchTarget{view: a.currentView, rowID: controller.rows[index].RowID}
 	}
 }

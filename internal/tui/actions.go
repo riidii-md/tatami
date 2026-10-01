@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/OleksandrBesan/tatami/internal/git"
+	appsearch "github.com/OleksandrBesan/tatami/internal/search"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -28,6 +30,7 @@ type ActionView struct {
 	workspace  *workspace.Workspace
 	actions    []Action
 	cursor     int
+	search     searchController
 	inZellij   bool
 	inTmux     bool
 	mobileMode bool
@@ -85,18 +88,30 @@ func NewActionView(ws *workspace.Workspace, inZellij, inTmux, inNewTab bool) *Ac
 		actions = append(actions, ActionCD)
 	}
 
-	return &ActionView{
+	view := &ActionView{
 		workspace: ws,
 		actions:   actions,
 		cursor:    0,
+		search:    newSearchController("actions"),
 		inZellij:  inZellij,
 		inTmux:    inTmux,
 	}
+	view.rebuildSearch()
+	return view
 }
 
 // Selected returns the currently selected action
 func (a *ActionView) Selected() Action {
-	return a.actions[a.cursor]
+	id, ok := a.search.ActiveDocumentID()
+	if !ok {
+		return ActionCD
+	}
+	for _, action := range a.actions {
+		if actionSearchID(action) == id {
+			return action
+		}
+	}
+	return ActionCD
 }
 
 // Workspace returns the workspace
@@ -108,48 +123,47 @@ func (a *ActionView) Workspace() *workspace.Workspace {
 func (a *ActionView) Update(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		event, cmd := a.handleKey(msg)
+		if event.Consumed {
+			return cmd
+		}
 		if a.mobileMode {
-			if index, ok := numberKeyIndex(msg.String(), len(a.actions)); ok {
-				a.cursor = index
+			if event := a.search.SelectVisibleChoice(msg.String(), 7, 1); event.Consumed {
+				a.cursor = a.search.ActiveIndex()
 				return nil
 			}
 		}
 		switch msg.String() {
-		case "j", "down":
-			if a.cursor < len(a.actions)-1 {
-				a.cursor++
-			}
-		case "k", "up":
-			if a.cursor > 0 {
-				a.cursor--
-			}
+		case "j":
+			a.search.Move(1)
+		case "k":
+			a.search.Move(-1)
 		case "1":
-			a.cursor = 0
+			a.search.SelectIndex(0)
 		case "2":
-			if len(a.actions) > 1 {
-				a.cursor = 1
-			}
+			a.search.SelectIndex(1)
 		case "3":
-			if len(a.actions) > 2 {
-				a.cursor = 2
-			}
+			a.search.SelectIndex(2)
 		case "4":
-			if len(a.actions) > 3 {
-				a.cursor = 3
-			}
+			a.search.SelectIndex(3)
 		}
+		a.cursor = a.search.ActiveIndex()
 	}
 	return nil
 }
 
-// View renders the action view
-func (a *ActionView) View() string {
-	var b strings.Builder
+func (a *ActionView) handleKey(msg tea.KeyMsg) (searchEvent, tea.Cmd) {
+	event, cmd := a.search.Update(msg)
+	a.cursor = a.search.ActiveIndex()
+	return event, cmd
+}
 
-	b.WriteString(titleStyle.Render("Open: " + a.workspace.Name))
-	b.WriteString("\n\n")
+func actionSearchID(action Action) appsearch.ID {
+	return appsearch.ID(fmt.Sprintf("action:%d", action))
+}
 
-	actionLabels := map[Action]string{
+func (a Action) Label(ws *workspace.Workspace) string {
+	labels := map[Action]string{
 		ActionCD:           "cd here",
 		ActionNewTab:       "new tab",
 		ActionNewPane:      "new pane",
@@ -157,28 +171,69 @@ func (a *ActionView) View() string {
 		ActionWithLayout:   "with saved layout",
 		ActionWorktree:     "open worktree...",
 	}
+	if a == ActionWithLayout && ws != nil && ws.Layout.Type == workspace.LayoutHerdr {
+		return "open in herdr"
+	}
+	return labels[a]
+}
 
-	for i, action := range a.actions {
-		cursor := choicePrefix(a.mobileMode, i, i == a.cursor)
+func (a *ActionView) rebuildSearch() {
+	documents := make([]appsearch.Document, 0, len(a.actions))
+	rows := make([]searchRow, 0, len(a.actions))
+	for index, action := range a.actions {
+		id := actionSearchID(action)
+		documents = append(documents, appsearch.Document{ID: id, Kind: "action", Primary: action.Label(a.workspace), Secondary: a.workspace.Name, Ordinal: index})
+		rows = append(rows, searchRow{RowID: id, DocumentID: id})
+	}
+	_ = a.search.ReplaceDocuments(1, documents, rows)
+}
+
+// View renders the action view
+func (a *ActionView) View() string {
+	var b strings.Builder
+
+	b.WriteString(titleStyle.Render("Open: " + a.workspace.Name))
+	b.WriteString("\n")
+	b.WriteString(a.search.QueryView())
+	b.WriteString("\n\n")
+
+	start, rows := a.search.VisibleRows(7, 1)
+	for visibleIndex, row := range rows {
+		i := start + visibleIndex
+		action, ok := a.actionByID(row.DocumentID)
+		if !ok {
+			continue
+		}
+		cursor := choicePrefix(a.mobileMode, visibleIndex, i == a.cursor)
 		style := normalStyle
 		if i == a.cursor {
 			style = selectedStyle
 		}
 
-		label := actionLabels[action]
-		if action == ActionWithLayout && a.workspace.Layout.Type == workspace.LayoutHerdr {
-			label = "open in herdr"
-		}
+		label := action.Label(a.workspace)
 		b.WriteString(cursor)
 		b.WriteString(style.Render(label))
 		b.WriteString("\n")
 	}
+	if len(a.search.Rows()) == 0 {
+		b.WriteString(mutedStyle.Render("No matching actions."))
+		b.WriteString("\n")
+	}
 
-	help := "\n[enter]select  [esc]back"
+	help := "\n[type]search  [↓]browse  [enter]select  [esc]clear/back"
 	if a.mobileMode {
-		help = "\n[↑↓/1-9]select  [enter]open  [b]back"
+		help = "\n[type]search  [↓]browse  [1-9]select in browse  [enter]open"
 	}
 	b.WriteString(helpStyle.Render(help))
 
 	return renderPanel(b.String(), a.mobileMode)
+}
+
+func (a *ActionView) actionByID(id appsearch.ID) (Action, bool) {
+	for _, action := range a.actions {
+		if actionSearchID(action) == id {
+			return action, true
+		}
+	}
+	return 0, false
 }

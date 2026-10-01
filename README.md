@@ -233,23 +233,36 @@ Use `stack` direction to create stacked/tabbed panes that share the same space. 
 
 ## Keyboard Shortcuts
 
+Tatami opens selectable collections in search focus. Start typing immediately
+to match names and safe metadata such as paths, folders, branches, status, host
+routes, and sanitized repository identities. Press `↓` to move into browse
+focus, either before typing or after filtering. In browse focus, the existing
+single-letter commands are available; press `/` to return to the query.
+
 ### List View
 | Key | Action |
 |-----|--------|
-| `j` / `↓` | Move down |
-| `k` / `↑` | Move up |
-| `1`–`9` | Select a visible row in mobile mode |
-| `Enter` / `l` | Open action menu / Enter folder |
-| `b` | Go back in mobile mode (outside text inputs) |
+| Type | Search all currently known local and cached remote content |
+| `↓` | Enter browse focus on the first full/filtered result; then move down |
+| `↑` | Move up; from the first result, return to search focus |
+| `j` / `k` | Move in browse focus |
+| `1`–`9` | Select a visible row in mobile browse focus; digits are text in search focus |
+| `Enter` / `l` | Open the top/selected result / Enter folder |
+| `/` | Return to search focus without clearing the query |
+| `Esc` | Clear a query; with an empty query, go back or quit |
+| `b` | Go back in mobile browse focus; it is text in search focus |
 | `Enter` on a Herdr session | Start/attach to that session |
-| `h` / `Esc` | Go back (in folder) / Quit (at root) |
 | `n` | New workspace |
 | `e` | Edit workspace |
 | `d` | Delete workspace |
 | `*` / `s` | Toggle quick access (star) |
 | `f` | Create folder |
-| `/` | Filter workspaces |
 | `q` | Quit |
+
+Letter shortcuts in this table apply in browse focus. In search focus they are
+normal query text. Search uses already loaded snapshots and never contacts Git,
+Herdr, SSH, or remote hosts because of a keystroke. Unavailable, stale, or
+undiscovered remote data is not presented as a complete search.
 
 ### Create/Edit View
 | Key | Action |
@@ -265,19 +278,21 @@ Use `stack` direction to create stacked/tabbed panes that share the same space. 
 ### Action Menu
 | Key | Action |
 |-----|--------|
-| `j` / `k` | Navigate |
-| `1-4` | Quick select |
+| Type | Search actions |
+| `↓` then arrows or `j` / `k` | Browse actions |
+| `1-9` | Quick select in mobile browse focus |
 | `Enter` | Execute |
-| `Esc` | Back |
+| `Esc` | Clear query / Back |
 
 ### Worktree View
 | Key | Action |
 |-----|--------|
-| `j` / `k` | Navigate |
-| `Enter` | Select worktree / Create new |
+| Type | Search branch, path, commit, main state, and repository identity |
+| `↓` then arrows or `j` / `k` | Browse results |
+| `Enter` | Select worktree or the explicit create-from-query result |
 | `d` | Delete worktree |
 | `Tab` | Cycle branch suggestions (when creating) |
-| `Esc` | Back |
+| `Esc` | Clear query / Back |
 
 ## Actions
 
