@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	repositorygit "github.com/OleksandrBesan/tatami/internal/git"
 	"github.com/OleksandrBesan/tatami/internal/shell"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
 )
@@ -25,6 +26,7 @@ type WorkspaceSummary struct {
 	Name        string   `json:"name"`
 	Path        string   `json:"path"`
 	Folder      string   `json:"folder,omitempty"`
+	Repository  string   `json:"repository,omitempty"`
 	QuickAccess bool     `json:"quick_access,omitempty"`
 	Target      string   `json:"target,omitempty"`
 	Jump        []string `json:"jump,omitempty"`
@@ -47,6 +49,10 @@ type Inventory struct {
 }
 
 func BuildInventory(host string, workspaces []workspace.Workspace, sessions []shell.HerdrSession, endpoints []Endpoint) (Inventory, error) {
+	return BuildInventoryWithRepositories(host, workspaces, sessions, endpoints, nil)
+}
+
+func BuildInventoryWithRepositories(host string, workspaces []workspace.Workspace, sessions []shell.HerdrSession, endpoints []Endpoint, repositoryByPath map[string]string) (Inventory, error) {
 	inventory := Inventory{
 		Kind:       InventoryKind,
 		Version:    InventoryVersion,
@@ -60,6 +66,9 @@ func BuildInventory(host string, workspaces []workspace.Workspace, sessions []sh
 	}
 	for _, ws := range workspaces {
 		summary := WorkspaceSummary{Name: ws.Name, Path: ws.Path, Folder: ws.Folder, QuickAccess: ws.QuickAccess}
+		if !ws.IsRemote() {
+			summary.Repository = repositoryByPath[ws.Path]
+		}
 		if ws.IsRemote() {
 			summary.Target = ws.Remote.Host
 			summary.Jump = append([]string(nil), ws.Remote.Jump...)
@@ -154,6 +163,9 @@ func validateWorkspaceSummary(summary WorkspaceSummary) error {
 	if err := validateDisplayField("inventory workspace folder", summary.Folder, 1024); err != nil {
 		return err
 	}
+	if err := validateRepositoryIdentity(summary.Repository); err != nil {
+		return err
+	}
 	if summary.Target != "" {
 		endpoint := Endpoint{ID: "workspace", Label: "Workspace", Target: summary.Target, Via: summary.Jump}
 		if err := validateRoutedEndpoint(endpoint); err != nil {
@@ -161,6 +173,20 @@ func validateWorkspaceSummary(summary WorkspaceSummary) error {
 		}
 	} else if len(summary.Jump) > 0 {
 		return errors.New("inventory workspace jump route requires a target")
+	}
+	return nil
+}
+
+func validateRepositoryIdentity(identity string) error {
+	if identity == "" {
+		return nil
+	}
+	if err := validateDisplayField("inventory workspace repository", identity, repositorygit.MaxRepositoryDisplayBytes); err != nil {
+		return err
+	}
+	canonical, err := repositorygit.SanitizeRepositoryIdentity(identity)
+	if err != nil || canonical != identity {
+		return errors.New("unsafe inventory workspace repository")
 	}
 	return nil
 }

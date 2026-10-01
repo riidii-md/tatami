@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	appsearch "github.com/OleksandrBesan/tatami/internal/search"
 	"github.com/OleksandrBesan/tatami/internal/shell"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -21,6 +22,7 @@ const (
 type SessionView struct {
 	sessions     []shell.ZellijSession
 	cursor       int
+	search       searchController
 	mode         SessionMode
 	showExited   bool // Show exited sessions
 	canAttach    bool // Can attach (false when inside Zellij)
@@ -41,6 +43,7 @@ func (s *SessionView) SetMobileMode(enabled bool) {
 func NewSessionView(canAttach bool) *SessionView {
 	sv := &SessionView{
 		cursor:     0,
+		search:     newSearchController("Zellij sessions"),
 		mode:       SessionModeList,
 		showExited: false,
 		canAttach:  canAttach,
@@ -68,6 +71,7 @@ func (s *SessionView) refresh() {
 	if s.cursor >= len(s.visibleSessions()) {
 		s.cursor = max(0, len(s.visibleSessions())-1)
 	}
+	s.rebuildSearch()
 }
 
 // visibleSessions returns sessions filtered by showExited flag
@@ -92,20 +96,24 @@ func (s *SessionView) SetSize(width, height int) {
 
 // Selected returns the currently selected session name, or empty if none
 func (s *SessionView) Selected() string {
-	visible := s.visibleSessions()
-	if len(visible) == 0 || s.cursor >= len(visible) {
-		return ""
+	id, ok := s.search.ActiveDocumentID()
+	if ok {
+		if session, ok := s.sessionByID(id); ok {
+			return session.Name
+		}
 	}
-	return visible[s.cursor].Name
+	return ""
 }
 
 // IsCurrentSession returns true if the selected session is the current one
 func (s *SessionView) IsCurrentSession() bool {
-	visible := s.visibleSessions()
-	if len(visible) == 0 || s.cursor >= len(visible) {
-		return false
+	id, ok := s.search.ActiveDocumentID()
+	if ok {
+		if session, ok := s.sessionByID(id); ok {
+			return session.IsCurrent
+		}
 	}
-	return visible[s.cursor].IsCurrent
+	return false
 }
 
 // Mode returns the current mode
@@ -126,45 +134,82 @@ func (s *SessionView) Update(msg tea.Msg) tea.Cmd {
 }
 
 func (s *SessionView) updateList(msg tea.KeyMsg) tea.Cmd {
-	visible := s.visibleSessions()
+	event, cmd := s.handleKey(msg)
+	if event.Consumed {
+		return cmd
+	}
 	if s.mobileMode {
-		if index, ok := numberKeyIndex(msg.String(), len(visible)); ok {
-			s.cursor = index
+		if event := s.search.SelectVisibleChoice(msg.String(), 10, 1); event.Consumed {
+			s.cursor = s.search.ActiveIndex()
 			return nil
 		}
 	}
 
 	switch msg.String() {
-	case "j", "down":
-		if s.cursor < len(visible)-1 {
-			s.cursor++
-		}
-	case "k", "up":
-		if s.cursor > 0 {
-			s.cursor--
-		}
+	case "j":
+		s.search.Move(1)
+	case "k":
+		s.search.Move(-1)
 	case "g":
-		s.cursor = 0
+		s.search.SelectFirst()
 	case "G":
-		s.cursor = max(0, len(visible)-1)
+		s.search.SelectLast()
 	case "e":
 		// Toggle show exited sessions
 		s.showExited = !s.showExited
-		visible = s.visibleSessions()
-		if s.cursor >= len(visible) {
-			s.cursor = max(0, len(visible)-1)
-		}
+		s.rebuildSearch()
 	case "r":
 		// Refresh
 		s.refresh()
 	case "d":
 		// Delete - show confirmation
-		if len(visible) > 0 && s.cursor < len(visible) {
-			s.deleteTarget = visible[s.cursor].Name
+		if selected := s.Selected(); selected != "" {
+			s.deleteTarget = selected
 			s.mode = SessionModeConfirmDelete
 		}
 	}
+	s.cursor = s.search.ActiveIndex()
 	return nil
+}
+
+func (s *SessionView) handleKey(msg tea.KeyMsg) (searchEvent, tea.Cmd) {
+	if s.mode != SessionModeList {
+		return searchEvent{}, nil
+	}
+	event, cmd := s.search.Update(msg)
+	s.cursor = s.search.ActiveIndex()
+	return event, cmd
+}
+
+func zellijSessionSearchID(name string) appsearch.ID { return appsearch.ID("zellij-session:" + name) }
+
+func (s *SessionView) rebuildSearch() {
+	visible := s.visibleSessions()
+	documents := make([]appsearch.Document, 0, len(visible))
+	rows := make([]searchRow, 0, len(visible))
+	for index, session := range visible {
+		id := zellijSessionSearchID(session.Name)
+		state := "running"
+		boost := 0
+		if session.IsCurrent {
+			state, boost = "current running", 3
+		} else if session.IsExited {
+			state = "exited"
+		}
+		documents = append(documents, appsearch.Document{ID: id, Kind: "zellij-session", Primary: session.Name, Secondary: session.CreatedAt, Fields: []appsearch.Field{{Name: "status", Value: state, Class: appsearch.MetadataField}}, Ordinal: index, Boost: boost})
+		rows = append(rows, searchRow{RowID: id, DocumentID: id})
+	}
+	_ = s.search.ReplaceDocuments(s.search.generation+1, documents, rows)
+	s.cursor = s.search.ActiveIndex()
+}
+
+func (s *SessionView) sessionByID(id appsearch.ID) (shell.ZellijSession, bool) {
+	for _, session := range s.visibleSessions() {
+		if zellijSessionSearchID(session.Name) == id {
+			return session, true
+		}
+	}
+	return shell.ZellijSession{}, false
 }
 
 func (s *SessionView) updateConfirmDelete(msg tea.KeyMsg) tea.Cmd {
@@ -192,7 +237,13 @@ func (s *SessionView) View() string {
 	var b strings.Builder
 
 	b.WriteString(titleStyle.Render("Zellij Sessions"))
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+	if s.mode == SessionModeList {
+		b.WriteString(s.search.QueryView())
+		b.WriteString("\n\n")
+	} else {
+		b.WriteString("\n")
+	}
 
 	if s.err != nil {
 		b.WriteString(errorStyle.Render(fmt.Sprintf("Error: %v", s.err)))
@@ -210,7 +261,7 @@ func (s *SessionView) View() string {
 	}
 
 	visible := s.visibleSessions()
-	if len(visible) == 0 {
+	if len(s.search.Rows()) == 0 {
 		if len(s.sessions) == 0 {
 			b.WriteString(mutedStyle.Render("No Zellij sessions found."))
 		} else {
@@ -229,9 +280,15 @@ func (s *SessionView) View() string {
 	}
 
 	// Show sessions
-	for i, session := range visible {
+	start, rows := s.search.VisibleRows(10, 1)
+	for visibleIndex, row := range rows {
+		i := start + visibleIndex
+		session, ok := s.sessionByID(row.DocumentID)
+		if !ok {
+			continue
+		}
 
-		cursor := choicePrefix(s.mobileMode, i, i == s.cursor)
+		cursor := choicePrefix(s.mobileMode, visibleIndex, i == s.cursor)
 		style := normalStyle
 		if i == s.cursor {
 			style = selectedStyle
@@ -263,6 +320,10 @@ func (s *SessionView) View() string {
 		}
 		b.WriteString(line + "\n")
 	}
+	if s.search.Truncated() {
+		b.WriteString(mutedStyle.Render("Results truncated."))
+		b.WriteString("\n")
+	}
 
 	// Show exited count if hidden
 	if !s.showExited {
@@ -277,12 +338,12 @@ func (s *SessionView) View() string {
 	b.WriteString("\n")
 	var help string
 	if s.canAttach {
-		help = "[enter]attach  [d]elete  [e]xited  [r]efresh  [esc]back"
+		help = "[type]search  [↓]browse  [enter]attach  [esc]clear/back"
 		if s.showExited {
-			help = "[enter]attach  [d]elete  [e]hide  [r]efresh  [esc]back"
+			help = "[type]search  [↓]browse  [enter]attach  [esc]clear/back"
 		}
 	} else {
-		help = "[d]elete  [e]xited  [r]efresh  [esc]back"
+		help = "[type]search  [↓]browse  [esc]clear/back"
 		if s.showExited {
 			help = "[d]elete  [e]hide  [r]efresh  [esc]back"
 		}
@@ -290,9 +351,9 @@ func (s *SessionView) View() string {
 	}
 	if s.mobileMode {
 		if s.canAttach {
-			help = "[↑↓/1-9]select  [enter]attach\n[d]delete [e]exited [r]refresh [b]back"
+			help = "[type]search [↓]browse [enter]attach\n[d/e/r] commands in browse"
 		} else {
-			help = "[↑↓/1-9]select\n[d]delete [e]exited [r]refresh [b]back"
+			help = "[type]search [↓]browse\n[d/e/r] commands in browse"
 		}
 	}
 	b.WriteString(helpStyle.Render(help))

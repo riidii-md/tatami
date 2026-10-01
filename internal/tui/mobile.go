@@ -59,10 +59,16 @@ func numberedChoiceAtRow(view string, row int) (rune, bool) {
 	if row < 0 || row >= len(lines) {
 		return 0, false
 	}
+	bestIndex := len(lines[row]) + 1
+	bestChoice := rune(0)
 	for choice := '1'; choice <= '9'; choice++ {
-		if strings.Contains(lines[row], fmt.Sprintf("[%c]", choice)) {
-			return choice, true
+		if index := strings.Index(lines[row], fmt.Sprintf("[%c]", choice)); index >= 0 && index < bestIndex {
+			bestIndex = index
+			bestChoice = choice
 		}
+	}
+	if bestChoice != 0 {
+		return bestChoice, true
 	}
 	return 0, false
 }

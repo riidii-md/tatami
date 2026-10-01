@@ -2,12 +2,15 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -721,10 +724,17 @@ func TestRunCLIPrintsVersionedFederationInventory(t *testing.T) {
 		t.Fatal(err)
 	}
 	original := listHerdrSessionsForInventory
+	originalRepositoryResolver := inventoryRepositoryResolver
 	listHerdrSessionsForInventory = func() ([]shell.HerdrSession, error) {
 		return []shell.HerdrSession{{Name: "agents", Running: true}}, nil
 	}
-	t.Cleanup(func() { listHerdrSessionsForInventory = original })
+	inventoryRepositoryResolver = func(context.Context, string) (git.RepositoryIdentity, error) {
+		return git.RepositoryIdentity{CommonDir: "/repo/.git", Display: "github.com/riidii/tatami"}, nil
+	}
+	t.Cleanup(func() {
+		listHerdrSessionsForInventory = original
+		inventoryRepositoryResolver = originalRepositoryResolver
+	})
 
 	var out, errOut bytes.Buffer
 	if code := runCLI([]string{"hub", "inventory", "--json"}, &out, &errOut); code != 0 {
@@ -737,11 +747,61 @@ func TestRunCLIPrintsVersionedFederationInventory(t *testing.T) {
 	if len(inventory.Workspaces) != 1 || inventory.Workspaces[0].Name != "API" || len(inventory.Sessions) != 1 || inventory.Sessions[0].Name != "agents" || len(inventory.Hosts) != 1 || inventory.Hosts[0].ID != "macmini" {
 		t.Fatalf("inventory = %#v", inventory)
 	}
+	if inventory.Workspaces[0].Repository != "github.com/riidii/tatami" || strings.Contains(out.String(), "secret") {
+		t.Fatalf("repository inventory = %q output=%s", inventory.Workspaces[0].Repository, out.String())
+	}
 
 	out.Reset()
 	errOut.Reset()
 	if code := runCLI([]string{"hub", "inventory"}, &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "usage: tatami hub inventory --json") {
 		t.Fatalf("invalid hub command code=%d stderr=%q", code, errOut.String())
+	}
+}
+
+func TestResolveInventoryRepositoriesIsLocalBoundedAndDeadlineAware(t *testing.T) {
+	original := inventoryRepositoryResolver
+	var active atomic.Int32
+	var maximum atomic.Int32
+	var mu sync.Mutex
+	called := make([]string, 0)
+	inventoryRepositoryResolver = func(ctx context.Context, path string) (git.RepositoryIdentity, error) {
+		mu.Lock()
+		called = append(called, path)
+		mu.Unlock()
+		current := active.Add(1)
+		defer active.Add(-1)
+		for {
+			old := maximum.Load()
+			if current <= old || maximum.CompareAndSwap(old, current) {
+				break
+			}
+		}
+		<-ctx.Done()
+		return git.RepositoryIdentity{}, ctx.Err()
+	}
+	t.Cleanup(func() { inventoryRepositoryResolver = original })
+
+	workspaces := make([]workspace.Workspace, 0, 9)
+	for i := range 8 {
+		workspaces = append(workspaces, workspace.Workspace{Name: "local-" + string(rune('a'+i)), Path: "/local/" + string(rune('a'+i))})
+	}
+	workspaces = append(workspaces, workspace.Workspace{Name: "remote", Path: "/remote", Remote: &workspace.Remote{Host: "example", Path: "/remote"}})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	values := resolveInventoryRepositoriesContext(ctx, workspaces)
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("resolution exceeded total deadline: %v", elapsed)
+	}
+	if len(values) != 0 || maximum.Load() > 4 {
+		t.Fatalf("values=%#v maximum concurrency=%d", values, maximum.Load())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, path := range called {
+		if path == "/remote" {
+			t.Fatalf("remote workspace path was resolved: %#v", called)
+		}
 	}
 }
 

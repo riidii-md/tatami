@@ -7,49 +7,62 @@ import (
 	"time"
 
 	"github.com/OleksandrBesan/tatami/internal/herdrhub"
+	appsearch "github.com/OleksandrBesan/tatami/internal/search"
 	"github.com/OleksandrBesan/tatami/internal/shell"
 	"github.com/OleksandrBesan/tatami/internal/systemusage"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
-	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
 // ListItem represents an item on the Tatami home list.
 type ListItem struct {
-	Type      string // "workspace", "folder", "header"
-	Name      string
-	Workspace *workspace.Workspace
-	Herdr     *shell.HerdrSession
-	Endpoint  *herdrhub.Endpoint
+	Type       string // "workspace", "folder", "header"
+	Name       string
+	SearchID   appsearch.ID
+	RowID      appsearch.ID
+	FolderPath string
+	Breadcrumb string
+	MatchedBy  string
+	Repository string
+	Workspace  *workspace.Workspace
+	Herdr      *shell.HerdrSession
+	Endpoint   *herdrhub.Endpoint
 }
 
 // ListView displays the list of workspaces
 type ListView struct {
-	store            *workspace.Store
-	items            []ListItem
-	cursor           int
-	currentFolder    string // Current folder path (empty = root)
-	filter           textinput.Model
-	filtering        bool
-	inZellij         bool
-	width            int
-	height           int
-	mobileMode       bool
-	herdrSessions    herdrSessionLister
-	herdrUsage       *systemusage.SessionUsage
-	herdrUsageFor    string
-	herdrUsageErr    error
-	herdrLoading     bool
-	hubSnapshots     []herdrhub.Snapshot
-	hubEndpoints     map[string]herdrhub.Endpoint
-	hubEndpointOrder []herdrhub.Endpoint
-	hubCollapsed     map[string]bool
-	hubCollapseKnown map[string]bool
-	hubAgents        map[string][]herdrhub.Agent
-	hubAgentErr      map[string]error
-	hubAgentLoading  map[string]bool
-	mouseRows        map[int]int
+	store                 *workspace.Store
+	items                 []ListItem
+	normalItems           []ListItem
+	searchItems           map[appsearch.ID]ListItem
+	repositories          map[string]string
+	search                searchController
+	searchGeneration      uint64
+	searchSourceTruncated bool
+	selectionChanged      bool
+	cursor                int
+	currentFolder         string // Current folder path (empty = root)
+	inZellij              bool
+	width                 int
+	height                int
+	mobileMode            bool
+	herdrSessions         herdrSessionLister
+	localSessions         []shell.HerdrSession
+	localSessionsErr      error
+	herdrUsage            *systemusage.SessionUsage
+	herdrUsageFor         string
+	herdrUsageErr         error
+	herdrLoading          bool
+	hubSnapshots          []herdrhub.Snapshot
+	hubEndpoints          map[string]herdrhub.Endpoint
+	hubEndpointOrder      []herdrhub.Endpoint
+	hubCollapsed          map[string]bool
+	hubCollapseKnown      map[string]bool
+	hubAgents             map[string][]herdrhub.Agent
+	hubAgentErr           map[string]error
+	hubAgentLoading       map[string]bool
+	mouseRows             map[int]appsearch.ID
 }
 
 func hubSessionKey(endpoint, session string) string { return endpoint + "\x00" + session }
@@ -132,53 +145,40 @@ func NewListView(store *workspace.Store) *ListView {
 
 // NewListViewWithHerdrSessions creates a list view with an injected Herdr session source.
 func NewListViewWithHerdrSessions(store *workspace.Store, lister herdrSessionLister) *ListView {
-	ti := textinput.New()
-	ti.Placeholder = "Filter..."
-	ti.CharLimit = 50
-
 	lv := &ListView{
 		store:         store,
 		cursor:        0,
 		currentFolder: "",
-		filter:        ti,
-		filtering:     false,
+		search:        newSearchController("workspaces, sessions, repositories"),
+		searchItems:   make(map[appsearch.ID]ListItem),
+		repositories:  make(map[string]string),
 		herdrSessions: lister,
 	}
-	lv.refreshItems()
+	lv.refreshSources()
 	return lv
+}
+
+func (l *ListView) refreshSources() {
+	if l.herdrSessions != nil {
+		sessions, err := l.herdrSessions()
+		l.localSessionsErr = err
+		if err == nil {
+			l.localSessions = sessions
+		}
+	}
+	l.refreshItems()
 }
 
 // refreshItems rebuilds the item list based on current folder
 func (l *ListView) refreshItems() {
-	l.items = nil
-
-	if l.filtering && l.filter.Value() != "" {
-		// Filter mode - show all matching workspaces
-		query := strings.ToLower(l.filter.Value())
-		for _, ws := range l.store.List() {
-			if strings.Contains(strings.ToLower(ws.Name), query) ||
-				strings.Contains(strings.ToLower(ws.Path), query) {
-				wsCopy := ws
-				l.items = append(l.items, ListItem{Type: "workspace", Name: ws.Name, Workspace: &wsCopy})
-			}
+	if l.cursor >= 0 && l.cursor < len(l.items) && !listItemIsHeader(l.items[l.cursor]) {
+		rows := l.search.Rows()
+		active := l.search.ActiveIndex()
+		if active < 0 || active >= len(rows) || rows[active].RowID != l.items[l.cursor].RowID {
+			l.selectSearchRow(l.items[l.cursor].RowID)
 		}
-		if l.herdrSessions != nil {
-			if sessions, err := l.herdrSessions(); err == nil {
-				for _, session := range sessions {
-					if strings.Contains(strings.ToLower(session.Name), query) {
-						copy := session
-						l.items = append(l.items, ListItem{Type: "herdr_session", Name: session.Name, Herdr: &copy})
-					}
-				}
-			}
-		}
-		l.appendHubItems(query, true)
-		if l.cursor >= len(l.items) {
-			l.cursor = max(0, len(l.items)-1)
-		}
-		l.skipHeaders(1)
-		return
 	}
+	l.items = nil
 
 	// Normal mode - show structure
 	if l.currentFolder == "" {
@@ -210,7 +210,7 @@ func (l *ListView) refreshItems() {
 
 		// Herdr is a separate runtime/session group after Tatami's saved projects.
 		if l.herdrSessions != nil {
-			sessions, err := l.herdrSessions()
+			sessions, err := l.localSessions, l.localSessionsErr
 			l.items = append(l.items, ListItem{Type: "header", Name: "Herdr Hub"})
 			local := herdrhub.LocalEndpoint()
 			prefix := "▾ "
@@ -255,6 +255,366 @@ func (l *ListView) refreshItems() {
 		l.cursor = max(0, len(l.items)-1)
 	}
 	// Skip headers
+	l.skipHeaders(1)
+	l.prepareSearchProjection()
+}
+
+func (l *ListView) prepareSearchProjection() {
+	rowOccurrences := make(map[appsearch.ID]int)
+	emptyRows := make([]searchRow, 0, len(l.items))
+	for index := range l.items {
+		item := &l.items[index]
+		if listItemIsHeader(*item) {
+			continue
+		}
+		item.SearchID = l.listItemSearchID(*item)
+		if item.SearchID == "" {
+			item.SearchID = appsearch.ID(fmt.Sprintf("presentation:%d", index))
+		}
+		occurrence := rowOccurrences[item.SearchID]
+		rowOccurrences[item.SearchID] = occurrence + 1
+		item.RowID = appsearch.ID(fmt.Sprintf("%s#%d", item.SearchID, occurrence))
+		emptyRows = append(emptyRows, searchRow{RowID: item.RowID, DocumentID: item.SearchID})
+	}
+	l.normalItems = append(l.normalItems[:0], l.items...)
+
+	searchItems, sourceTruncated := l.collectSearchItems()
+	l.searchSourceTruncated = sourceTruncated
+	documents := make([]appsearch.Document, 0, len(searchItems))
+	l.searchItems = make(map[appsearch.ID]ListItem, len(searchItems))
+	for ordinal, item := range searchItems {
+		if _, exists := l.searchItems[item.SearchID]; exists || item.SearchID == "" {
+			continue
+		}
+		l.searchItems[item.SearchID] = item
+		documents = append(documents, l.searchDocument(item, ordinal))
+	}
+	l.searchGeneration++
+	if err := l.search.ReplaceDocuments(l.searchGeneration, documents, emptyRows); err != nil {
+		l.search.Clear()
+	}
+	l.applySearchProjection()
+}
+
+func (l *ListView) collectSearchItems() ([]ListItem, bool) {
+	capacity := min(len(l.store.List())+len(l.localSessions)+len(l.hubSnapshots)*8, appsearch.MaxDocuments)
+	items := make([]ListItem, 0, capacity)
+	truncated := false
+	appendItem := func(item ListItem) bool {
+		if len(items) >= appsearch.MaxDocuments {
+			truncated = true
+			return false
+		}
+		items = append(items, item)
+		return true
+	}
+	folders := make(map[string]struct{})
+	for _, saved := range l.store.List() {
+		ws := saved
+		item := ListItem{Type: "workspace", Name: ws.Name, Workspace: &ws, Breadcrumb: ws.Folder, Repository: l.repositories[ws.Path]}
+		item.SearchID = l.listItemSearchID(item)
+		if !appendItem(item) {
+			return items, truncated
+		}
+		parts := strings.Split(strings.Trim(ws.Folder, "/"), "/")
+		for i := range parts {
+			if parts[i] == "" {
+				continue
+			}
+			folders[strings.Join(parts[:i+1], "/")] = struct{}{}
+		}
+	}
+	folderPaths := make([]string, 0, len(folders))
+	for folder := range folders {
+		folderPaths = append(folderPaths, folder)
+	}
+	sort.Strings(folderPaths)
+	for _, folder := range folderPaths {
+		item := ListItem{Type: "folder", Name: folder, FolderPath: folder, Breadcrumb: "Tatami Projects"}
+		item.SearchID = l.listItemSearchID(item)
+		if !appendItem(item) {
+			return items, truncated
+		}
+	}
+
+	if l.herdrSessions != nil {
+		local := herdrhub.LocalEndpoint()
+		state := herdrhub.StateOnline
+		if l.localSessionsErr != nil {
+			state = herdrhub.StateOffline
+		}
+		endpoint := ListItem{Type: "herdr_endpoint", Name: "Herdr · This Mac · " + string(state), Endpoint: &local, Breadcrumb: "Herdr Hub"}
+		endpoint.SearchID = l.listItemSearchID(endpoint)
+		if !appendItem(endpoint) {
+			return items, truncated
+		}
+		for _, session := range l.localSessions {
+			copy := session
+			item := ListItem{Type: "herdr_session", Name: session.Name, Herdr: &copy, Breadcrumb: "Herdr · This Mac"}
+			item.SearchID = l.listItemSearchID(item)
+			if !appendItem(item) {
+				return items, truncated
+			}
+		}
+	}
+
+	snapshots := make(map[string]herdrhub.Snapshot, len(l.hubSnapshots))
+	for _, snapshot := range l.hubSnapshots {
+		snapshots[snapshot.EndpointID] = snapshot
+	}
+	seen := make(map[string]bool)
+	for _, endpoint := range l.hubEndpointOrder {
+		if endpoint.ID != herdrhub.LocalEndpointID {
+			if l.collectHubSearchItems(&items, endpoint, snapshots, seen) {
+				truncated = true
+				break
+			}
+		}
+	}
+	return items, truncated
+}
+
+func (l *ListView) collectHubSearchItems(items *[]ListItem, endpoint herdrhub.Endpoint, snapshots map[string]herdrhub.Snapshot, seen map[string]bool) bool {
+	if len(*items) >= appsearch.MaxDocuments {
+		return true
+	}
+	key := endpoint.Key()
+	if seen[key] {
+		return false
+	}
+	seen[key] = true
+	snapshot, ok := snapshots[key]
+	if !ok {
+		snapshot = herdrhub.Snapshot{EndpointID: key, State: herdrhub.StateLoading}
+	}
+	endpointCopy := endpoint
+	endpointItem := ListItem{
+		Type:       "herdr_endpoint",
+		Name:       endpoint.Label,
+		Breadcrumb: "Tatami · " + key + " · " + hubEndpointStatus(snapshot),
+		Endpoint:   &endpointCopy,
+	}
+	endpointItem.SearchID = l.listItemSearchID(endpointItem)
+	*items = append(*items, endpointItem)
+	for _, summary := range snapshot.Workspaces {
+		if len(*items) >= appsearch.MaxDocuments {
+			return true
+		}
+		workspaceItem, ok := remoteWorkspaceListItem(endpoint, summary)
+		if !ok {
+			continue
+		}
+		workspaceItem.Breadcrumb = endpoint.Label
+		workspaceItem.SearchID = l.listItemSearchID(workspaceItem)
+		*items = append(*items, workspaceItem)
+	}
+	for _, session := range snapshot.Sessions {
+		if len(*items) >= appsearch.MaxDocuments {
+			return true
+		}
+		copy := shell.HerdrSession{Name: session.SessionName, Running: session.Running, Default: session.Default}
+		item := ListItem{Type: "herdr_session", Name: session.SessionName, Herdr: &copy, Endpoint: &endpointCopy, Breadcrumb: endpoint.Label + " · " + key}
+		item.SearchID = l.listItemSearchID(item)
+		*items = append(*items, item)
+	}
+	for _, savedChild := range snapshot.Hosts {
+		if len(*items) >= appsearch.MaxDocuments {
+			return true
+		}
+		child, err := herdrhub.DescendantEndpoint(endpoint, savedChild)
+		if err == nil {
+			if l.collectHubSearchItems(items, child, snapshots, seen) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func remoteWorkspaceListItem(endpoint herdrhub.Endpoint, summary herdrhub.WorkspaceSummary) (ListItem, bool) {
+	target := endpoint.Target
+	jump := append([]string(nil), endpoint.Via...)
+	if summary.Target != "" {
+		route := append(append([]string(nil), jump...), endpoint.Target)
+		route = append(route, summary.Jump...)
+		route = append(route, summary.Target)
+		if len(route) > herdrhub.MaxRouteDepth {
+			return ListItem{}, false
+		}
+		seen := make(map[string]bool, len(route))
+		for _, hop := range route {
+			if seen[hop] {
+				return ListItem{}, false
+			}
+			seen[hop] = true
+		}
+		jump = append([]string(nil), route[:len(route)-1]...)
+		target = summary.Target
+	}
+	displayName := summary.Name
+	if summary.Folder != "" {
+		displayName = summary.Folder + "/" + summary.Name
+	}
+	endpointCopy := endpoint
+	return ListItem{
+		Type:       "workspace",
+		Name:       displayName + " · " + endpoint.Label,
+		Repository: summary.Repository,
+		Workspace: &workspace.Workspace{
+			Name:        summary.Name,
+			Path:        summary.Path,
+			Folder:      summary.Folder,
+			QuickAccess: summary.QuickAccess,
+			Remote:      &workspace.Remote{Host: target, Path: summary.Path, Jump: jump},
+			Layout:      workspace.Layout{Type: workspace.LayoutNone},
+		},
+		Endpoint: &endpointCopy,
+	}, true
+}
+
+func (l *ListView) listItemSearchID(item ListItem) appsearch.ID {
+	switch item.Type {
+	case "workspace":
+		if item.Workspace == nil {
+			return ""
+		}
+		if item.Endpoint != nil {
+			return compositeSearchID("workspace:remote", item.Endpoint.Key(), item.Workspace.Name, item.Workspace.Folder, item.Workspace.Path)
+		}
+		return compositeSearchID("workspace:local", item.Workspace.Name, item.Workspace.Path)
+	case "folder":
+		path := item.FolderPath
+		if path == "" && item.Name != ".." {
+			path = strings.Trim(strings.Trim(l.currentFolder, "/")+"/"+item.Name, "/")
+		}
+		if path == "" {
+			return appsearch.ID("folder:back:" + l.currentFolder)
+		}
+		return appsearch.ID("folder:" + path)
+	case "herdr_endpoint":
+		if item.Endpoint != nil {
+			return appsearch.ID("endpoint:" + item.Endpoint.Key())
+		}
+	case "herdr_session":
+		if item.Herdr == nil {
+			return ""
+		}
+		endpoint := herdrhub.LocalEndpointID
+		if item.Endpoint != nil {
+			endpoint = item.Endpoint.Key()
+		}
+		return appsearch.ID("session:" + endpoint + ":" + item.Herdr.Name)
+	}
+	return ""
+}
+
+func compositeSearchID(kind string, parts ...string) appsearch.ID {
+	var result strings.Builder
+	result.WriteString(kind)
+	for _, part := range parts {
+		fmt.Fprintf(&result, ":%d:%s", len(part), part)
+	}
+	return appsearch.ID(result.String())
+}
+
+func (l *ListView) searchDocument(item ListItem, ordinal int) appsearch.Document {
+	document := appsearch.Document{ID: item.SearchID, Kind: appsearch.Kind(item.Type), Primary: item.Name, Secondary: item.Breadcrumb, Ordinal: ordinal}
+	add := func(name, value string) {
+		if value != "" {
+			document.Fields = append(document.Fields, appsearch.Field{Name: name, Value: value, Class: appsearch.MetadataField})
+		}
+	}
+	add("type", strings.ReplaceAll(item.Type, "_", " "))
+	switch item.Type {
+	case "workspace":
+		if item.Workspace != nil {
+			document.Primary = item.Workspace.Name
+			document.Secondary = item.Workspace.Path
+			add("folder", item.Workspace.Folder)
+			add("repository", item.Repository)
+			if item.Workspace.QuickAccess {
+				document.Boost = 3
+				add("status", "quick access")
+			}
+		}
+		if item.Endpoint != nil {
+			add("endpoint", item.Endpoint.Label+" "+item.Endpoint.Key())
+		}
+	case "folder":
+		document.Primary = item.FolderPath
+	case "herdr_endpoint":
+		if item.Endpoint != nil {
+			document.Primary = item.Endpoint.Label
+			if item.Endpoint.ID == herdrhub.LocalEndpointID {
+				document.Primary = "Herdr This Mac"
+			}
+			add("route", item.Endpoint.Key()+" "+item.Endpoint.Target)
+		}
+	case "herdr_session":
+		if item.Herdr != nil {
+			document.Primary = item.Herdr.Name
+			if item.Herdr.Running {
+				document.Boost = 2
+				add("status", "running")
+			} else {
+				add("status", "stopped")
+			}
+		}
+		if item.Endpoint != nil && item.Herdr != nil {
+			add("endpoint", item.Endpoint.Label+" "+item.Endpoint.Key())
+			for _, agent := range l.hubAgents[hubSessionKey(item.Endpoint.Key(), item.Herdr.Name)] {
+				add("agent", agent.Kind+" "+agent.Status+" "+agent.CWD)
+			}
+		}
+	}
+	return document
+}
+
+func (l *ListView) SetRepositoryIdentities(repositories map[string]string) {
+	l.repositories = make(map[string]string, len(repositories))
+	for path, repository := range repositories {
+		if path != "" && repository != "" {
+			l.repositories[path] = repository
+		}
+	}
+	l.refreshItems()
+}
+
+func (l *ListView) applySearchProjection() {
+	if l.search.Query() == "" {
+		l.items = append(l.items[:0], l.normalItems...)
+		l.syncCursorFromSearch()
+		return
+	}
+	l.items = l.items[:0]
+	for _, row := range l.search.Rows() {
+		item, ok := l.searchItems[row.DocumentID]
+		if !ok {
+			continue
+		}
+		item.RowID = row.RowID
+		if match, ok := l.search.MatchFor(row.DocumentID); ok && match.MatchedField != "" {
+			item.MatchedBy = match.MatchedField + ": " + match.MatchedValue
+		}
+		l.items = append(l.items, item)
+	}
+	l.cursor = clampInt(l.search.ActiveIndex(), 0, max(0, len(l.items)-1))
+}
+
+func (l *ListView) syncCursorFromSearch() {
+	rows := l.search.Rows()
+	active := l.search.ActiveIndex()
+	if active < 0 || active >= len(rows) {
+		l.cursor = 0
+		return
+	}
+	for index := range l.items {
+		if l.items[index].RowID == rows[active].RowID {
+			l.cursor = index
+			return
+		}
+	}
+	l.cursor = 0
 	l.skipHeaders(1)
 }
 
@@ -508,9 +868,9 @@ func (l *ListView) compact() bool {
 }
 
 func (l *ListView) visibleRange() (int, int) {
-	listHeight := l.height - 10
+	listHeight := l.height - 12
 	if l.compact() {
-		listHeight = l.height - 6
+		listHeight = l.height - 8
 	}
 	if listHeight < 5 {
 		listHeight = 5
@@ -545,6 +905,9 @@ func (l *ListView) visibleOrdinal(itemIndex, start int) int {
 }
 
 func (l *ListView) selectVisibleNumber(key string) bool {
+	if l.search.InQueryFocus() {
+		return false
+	}
 	start, end := l.visibleRange()
 	selectable := make([]int, 0, end-start)
 	for i := start; i < end && len(selectable) < 9; i++ {
@@ -557,16 +920,34 @@ func (l *ListView) selectVisibleNumber(key string) bool {
 		return false
 	}
 	l.cursor = selectable[index]
+	l.selectSearchRow(l.items[l.cursor].RowID)
+	l.selectionChanged = true
 	return true
 }
 
 func (l *ListView) selectMouseRow(row int) bool {
-	index, ok := l.mouseRows[row]
-	if !ok || index < 0 || index >= len(l.items) || listItemIsHeader(l.items[index]) {
+	rowID, ok := l.mouseRows[row]
+	if !ok {
 		return false
 	}
-	l.cursor = index
-	return true
+	for index := range l.items {
+		if l.items[index].RowID == rowID && !listItemIsHeader(l.items[index]) {
+			l.cursor = index
+			l.selectSearchRow(rowID)
+			l.selectionChanged = true
+			return true
+		}
+	}
+	return false
+}
+
+func (l *ListView) selectSearchRow(rowID appsearch.ID) {
+	for index, row := range l.search.Rows() {
+		if row.RowID == rowID {
+			l.search.SelectIndex(index)
+			return
+		}
+	}
 }
 
 func (l *ListView) recordMouseRow(rendered string, index int) {
@@ -574,7 +955,7 @@ func (l *ListView) recordMouseRow(rendered string, index int) {
 	if !l.compact() {
 		row++ // desktop rendering has one row of outer vertical padding
 	}
-	l.mouseRows[row] = index
+	l.mouseRows[row] = l.items[index].RowID
 }
 
 // Selected returns the currently selected item
@@ -611,6 +992,7 @@ func (l *ListView) EnterFolder(name string) {
 			l.currentFolder = l.currentFolder + "/" + name
 		}
 	}
+	l.search.Clear()
 	l.refreshItems()
 	// Skip ".." and start on first actual item when entering a folder
 	if name != ".." && len(l.items) > 1 {
@@ -623,13 +1005,14 @@ func (l *ListView) EnterFolder(name string) {
 
 // Refresh reloads items from store
 func (l *ListView) Refresh() {
-	l.refreshItems()
+	l.refreshSources()
 }
 
 // SetCurrentFolder sets the current folder path
 func (l *ListView) SetCurrentFolder(folder string) {
 	l.currentFolder = folder
 	l.cursor = 0
+	l.search.Clear()
 	l.refreshItems()
 }
 
@@ -664,42 +1047,35 @@ func (l *ListView) ClearHerdrUsage() {
 
 // Update handles input for the list view
 func (l *ListView) Update(msg tea.Msg) tea.Cmd {
-	if l.filtering {
-		var cmd tea.Cmd
-		l.filter, cmd = l.filter.Update(msg)
-		l.refreshItems()
-		return cmd
-	}
-
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		event, cmd := l.handleKey(msg)
+		if event.Consumed {
+			return cmd
+		}
 		if l.mobileMode && l.selectVisibleNumber(msg.String()) {
 			return nil
 		}
 		switch msg.String() {
-		case "j", "down":
-			if l.cursor < len(l.items)-1 {
-				l.cursor++
-				l.skipHeaders(1)
+		case "j":
+			if l.search.Move(1).BrowseSelectionChanged {
+				l.selectionChanged = true
 			}
-		case "k", "up":
-			if l.cursor > 0 {
-				l.cursor--
-				l.skipHeaders(-1)
+			l.applySearchProjection()
+		case "k":
+			if l.search.Move(-1).BrowseSelectionChanged {
+				l.selectionChanged = true
 			}
+			l.applySearchProjection()
 		case "g":
-			l.cursor = 0
-			l.skipHeaders(1)
+			l.search.SelectFirst()
+			l.applySearchProjection()
 		case "G":
-			l.cursor = max(0, len(l.items)-1)
-			l.skipHeaders(-1)
-		case "/":
-			l.filtering = true
-			l.filter.Focus()
-			return nil
+			l.search.SelectLast()
+			l.applySearchProjection()
 		case "backspace", "h":
 			// Go back if in a folder
-			if l.currentFolder != "" && !l.filtering {
+			if l.currentFolder != "" {
 				l.EnterFolder("..")
 			}
 		}
@@ -707,28 +1083,51 @@ func (l *ListView) Update(msg tea.Msg) tea.Cmd {
 	return nil
 }
 
+func (l *ListView) handleKey(msg tea.KeyMsg) (searchEvent, tea.Cmd) {
+	if l.cursor >= 0 && l.cursor < len(l.items) && !listItemIsHeader(l.items[l.cursor]) {
+		rows := l.search.Rows()
+		active := l.search.ActiveIndex()
+		if active < 0 || active >= len(rows) || rows[active].RowID != l.items[l.cursor].RowID {
+			l.selectSearchRow(l.items[l.cursor].RowID)
+		}
+	}
+	event, cmd := l.search.Update(msg)
+	if event.Consumed {
+		if event.BrowseSelectionChanged {
+			l.selectionChanged = true
+		}
+		l.applySearchProjection()
+	}
+	return event, cmd
+}
+
+func (l *ListView) consumeBrowseSelectionChanged() bool {
+	changed := l.selectionChanged
+	l.selectionChanged = false
+	return changed
+}
+
 // StopFiltering exits filter mode
 func (l *ListView) StopFiltering() {
-	l.filtering = false
-	l.filter.Blur()
-	l.refreshItems()
+	l.search.SelectIndex(l.search.ActiveIndex())
+	l.applySearchProjection()
 }
 
 // ClearFilter resets the filter
 func (l *ListView) ClearFilter() {
-	l.filter.SetValue("")
-	l.StopFiltering()
+	l.search.Clear()
+	l.applySearchProjection()
 }
 
 // IsFiltering returns whether filter mode is active
 func (l *ListView) IsFiltering() bool {
-	return l.filtering
+	return l.search.InQueryFocus()
 }
 
 // View renders the list view
 func (l *ListView) View() string {
 	var b strings.Builder
-	l.mouseRows = make(map[int]int)
+	l.mouseRows = make(map[int]appsearch.ID)
 
 	// Title
 	title := "TATAMI"
@@ -742,18 +1141,15 @@ func (l *ListView) View() string {
 		b.WriteString("\n\n")
 	}
 
-	// Filter input (if active)
-	if l.filtering {
-		b.WriteString(l.filter.View())
-		b.WriteString("\n\n")
-	}
+	b.WriteString(l.search.QueryView())
+	b.WriteString("\n\n")
 
 	// Item list
 	if len(l.items) == 0 {
-		if l.store.List() == nil || len(l.store.List()) == 0 {
+		if l.search.Query() != "" {
+			b.WriteString(mutedStyle.Render("No matches in known data."))
+		} else if l.store.List() == nil || len(l.store.List()) == 0 {
 			b.WriteString(mutedStyle.Render("No workspaces yet. Press 'n' to create one."))
-		} else if l.filtering {
-			b.WriteString(mutedStyle.Render("No matching workspaces."))
 		} else {
 			b.WriteString(mutedStyle.Render("Empty folder. Press 'n' to create a workspace."))
 		}
@@ -802,6 +1198,7 @@ func (l *ListView) View() string {
 				l.recordMouseRow(b.String(), i)
 				b.WriteString(style.Render(item.Name))
 				b.WriteString("\n")
+				l.renderSearchContext(&b, item)
 
 			case "folder":
 				l.recordMouseRow(b.String(), i)
@@ -815,6 +1212,7 @@ func (l *ListView) View() string {
 					icon = "⬅ "
 				}
 				b.WriteString(fmt.Sprintf("%s%s%s/\n", cursor, icon, style.Render(item.Name)))
+				l.renderSearchContext(&b, item)
 
 			case "workspace":
 				l.recordMouseRow(b.String(), i)
@@ -845,6 +1243,7 @@ func (l *ListView) View() string {
 					line = fmt.Sprintf("%s%s%-20s %s", cursor, star, name, path)
 				}
 				b.WriteString(line + "\n")
+				l.renderSearchContext(&b, item)
 
 			case "herdr_session":
 				l.recordMouseRow(b.String(), i)
@@ -865,6 +1264,7 @@ func (l *ListView) View() string {
 				} else {
 					b.WriteString(fmt.Sprintf("%s%s %-20s %s\n", cursor, status, name, mutedStyle.Render(statusText)))
 				}
+				l.renderSearchContext(&b, item)
 			}
 		}
 
@@ -873,6 +1273,14 @@ func (l *ListView) View() string {
 			b.WriteString(mutedStyle.Render(scrollInfo))
 			b.WriteString("\n")
 		}
+	}
+	if l.search.Truncated() || l.searchSourceTruncated {
+		b.WriteString(mutedStyle.Render("Results truncated to the configured search limit."))
+		b.WriteString("\n")
+	}
+	if notice := l.searchSourceNotice(); notice != "" {
+		b.WriteString(mutedStyle.Render(notice))
+		b.WriteString("\n")
 	}
 
 	if usage := l.herdrUsageView(); usage != "" {
@@ -888,7 +1296,7 @@ func (l *ListView) View() string {
 
 	// Help text
 	var help string
-	if l.mobileMode && !l.filtering {
+	if l.mobileMode && !l.search.InQueryFocus() {
 		help = "[↑↓/1-9]select  [enter]open"
 		if l.currentFolder != "" {
 			help += "  [b]back"
@@ -916,8 +1324,8 @@ func (l *ListView) View() string {
 		} else {
 			help += "\n[n]ew [e]dit [d]elete [*]star [/]filter [q]uit"
 		}
-	} else if l.filtering {
-		help = "[enter]confirm  [esc]cancel"
+	} else if l.search.InQueryFocus() {
+		help = "[type]search  [↓]browse  [enter]open  [esc]clear/back"
 	} else if selected := l.Selected(); selected != nil && selected.Type == "herdr_endpoint" && selected.Endpoint != nil {
 		help = "[enter/space]collapse  [r]refresh  [R]refresh all  [a]add"
 		if selected.Endpoint.ID != herdrhub.LocalEndpointID {
@@ -956,6 +1364,56 @@ func (l *ListView) View() string {
 	}
 	content := renderScreenWithFooter(b.String(), helpStyle.Render(help), contentHeight)
 	return padding.Render(content)
+}
+
+func (l *ListView) searchSourceNotice() string {
+	if l.search.Query() == "" {
+		return ""
+	}
+	states := make([]string, 0)
+	if l.herdrSessions != nil && l.localSessionsErr != nil {
+		states = append(states, "This Mac offline")
+	}
+	byEndpoint := make(map[string]herdrhub.Snapshot, len(l.hubSnapshots))
+	for _, snapshot := range l.hubSnapshots {
+		byEndpoint[snapshot.EndpointID] = snapshot
+	}
+	for _, endpoint := range l.hubEndpointOrder {
+		if endpoint.ID == herdrhub.LocalEndpointID {
+			continue
+		}
+		snapshot, ok := byEndpoint[endpoint.Key()]
+		if !ok {
+			states = append(states, endpoint.Label+" undiscovered/loading")
+			continue
+		}
+		if snapshot.State != herdrhub.StateOnline {
+			state := snapshot.State
+			if state == "" {
+				state = herdrhub.StateLoading
+			}
+			states = append(states, endpoint.Label+" "+string(state))
+		}
+	}
+	if len(states) == 0 {
+		return ""
+	}
+	return "Known data incomplete: " + strings.Join(states, "; ")
+}
+
+func (l *ListView) renderSearchContext(builder *strings.Builder, item ListItem) {
+	if l.search.Query() == "" {
+		return
+	}
+	context := item.MatchedBy
+	if context == "" {
+		context = item.Breadcrumb
+	}
+	if context != "" {
+		builder.WriteString("    ")
+		builder.WriteString(mutedStyle.Render(context))
+		builder.WriteString("\n")
+	}
 }
 
 func (l *ListView) herdrUsageView() string {

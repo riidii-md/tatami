@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -38,6 +39,7 @@ type herdrWorkspaceManager interface {
 var newHerdrWorkspaceManager = func() herdrWorkspaceManager { return shell.NewHerdrRunner() }
 var listWorktreesForCLI = git.ListWorktrees
 var createWorktreeForCLI = git.CreateWorktree
+var inventoryRepositoryResolver = git.NewRepositoryResolver(4).Resolve
 
 var runInteractiveCommand = func(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
@@ -249,7 +251,9 @@ func handleHubCommand(args []string, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("read hostname: %w", err)
 	}
-	inventory, err := herdrhub.BuildInventory(host, workspaceStore.List(), sessions, endpoints)
+	workspaces := workspaceStore.List()
+	repositories := resolveInventoryRepositories(workspaces)
+	inventory, err := herdrhub.BuildInventoryWithRepositories(host, workspaces, sessions, endpoints, repositories)
 	if err != nil {
 		return fmt.Errorf("build Tatami inventory: %w", err)
 	}
@@ -257,6 +261,47 @@ func handleHubCommand(args []string, out io.Writer) error {
 		return fmt.Errorf("write Tatami inventory: %w", err)
 	}
 	return nil
+}
+
+func resolveInventoryRepositories(workspaces []workspace.Workspace) map[string]string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return resolveInventoryRepositoriesContext(ctx, workspaces)
+}
+
+func resolveInventoryRepositoriesContext(ctx context.Context, workspaces []workspace.Workspace) map[string]string {
+	values := make(map[string]string)
+	if inventoryRepositoryResolver == nil {
+		return values
+	}
+	var mu sync.Mutex
+	var wait sync.WaitGroup
+	semaphore := make(chan struct{}, 4)
+	for _, saved := range workspaces {
+		if saved.IsRemote() || strings.TrimSpace(saved.Path) == "" {
+			continue
+		}
+		path := saved.Path
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			select {
+			case semaphore <- struct{}{}:
+				defer func() { <-semaphore }()
+			case <-ctx.Done():
+				return
+			}
+			identity, err := inventoryRepositoryResolver(ctx, path)
+			if err != nil || identity.Display == "" {
+				return
+			}
+			mu.Lock()
+			values[path] = identity.Display
+			mu.Unlock()
+		}()
+	}
+	wait.Wait()
+	return values
 }
 
 func handleResourcesCommand(args []string, out io.Writer) error {
