@@ -1,31 +1,39 @@
 package shell
 
 import (
-	"strings"
-
+	"errors"
+	"github.com/OleksandrBesan/tatami/internal/sshconn"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
 )
 
 func shellQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+	return sshconn.QuotePOSIX(value)
 }
 
 // BuildRemoteSSHCommand builds a local-shell-safe SSH command for a workspace.
 // ProxyJump is intentionally used instead of agent forwarding: every hop is
 // authenticated by the machine where Tatami is running.
-func BuildRemoteSSHCommand(remote *workspace.Remote, command string) string {
+func BuildRemoteSSHCommand(remote *workspace.Remote, command string) (string, error) {
+	cmd, err := BuildRemoteSSH(remote, command)
+	if err != nil {
+		return "", err
+	}
+	return sshconn.RenderPOSIX(cmd), nil
+}
+
+// BuildRemoteSSH adapts both persisted legacy remotes and resolved hub profiles.
+func BuildRemoteSSH(remote *workspace.Remote, command string) (sshconn.Command, error) {
 	if remote == nil {
-		return ""
+		return sshconn.Command{}, errors.New("remote SSH settings are required")
+	}
+	if !sshconn.SafeText(remote.Path) {
+		return sshconn.Command{}, errors.New("remote workspace path contains unsupported characters")
 	}
 
-	parts := []string{"ssh"}
-	if remote.Key != "" {
-		parts = append(parts, "-i", shellQuote(remote.Key))
+	connection := sshconn.Connection{Destination: remote.Host, IdentityFile: remote.Key, Jump: remote.Jump}
+	if remote.Connection != nil {
+		connection = *remote.Connection
 	}
-	if len(remote.Jump) > 0 {
-		parts = append(parts, "-J", shellQuote(strings.Join(remote.Jump, ",")))
-	}
-	parts = append(parts, "-t", "--", shellQuote(remote.Host))
 
 	remoteCommand := command
 	if remoteCommand == "" {
@@ -34,6 +42,5 @@ func BuildRemoteSSHCommand(remote *workspace.Remote, command string) string {
 	if remote.Path != "" {
 		remoteCommand = "cd " + shellQuote(remote.Path) + " && " + remoteCommand
 	}
-	parts = append(parts, shellQuote(remoteCommand))
-	return strings.Join(parts, " ")
+	return sshconn.Build(connection, sshconn.Attach, remoteCommand)
 }

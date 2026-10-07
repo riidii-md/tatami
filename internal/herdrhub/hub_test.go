@@ -23,7 +23,7 @@ func TestStoreRoundTripAndLocal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got, []Endpoint{LocalEndpoint(), {ID: "work", Label: "Work", Kind: EndpointSSH, Target: "work"}}) {
+	if len(got) != 2 || got[0].ID != LocalEndpointID || got[1].ID != "work" || got[1].Label != "Work" || got[1].Kind != EndpointSSH || got[1].Target != "work" || got[1].Profile == nil {
 		t.Fatalf("List()=%#v", got)
 	}
 	info, err := os.Stat(p)
@@ -130,7 +130,7 @@ func TestRejectsUnsafeRemoteInventoryFields(t *testing.T) {
 func TestExactQueryAndAttachArgs(t *testing.T) {
 	remote := Endpoint{ID: "work", Label: "Work", Target: "oles@bmo.local"}
 	n, a, err := QueryArgs(remote)
-	if err != nil || n != "ssh" || !reflect.DeepEqual(a, []string{"-o", "BatchMode=yes", "--", "oles@bmo.local", "herdr", "session", "list", "--json"}) {
+	if err != nil || n != "ssh" || !reflect.DeepEqual(a, []string{"-a", "-o", "BatchMode=yes", "--", "oles@bmo.local", remoteHerdrCommand(remote, "session", "list", "--json")}) {
 		t.Fatalf("query %s %#v %v", n, a, err)
 	}
 	n, a, err = AttachArgs(remote, "same")
@@ -138,11 +138,11 @@ func TestExactQueryAndAttachArgs(t *testing.T) {
 		t.Fatalf("attach %s %#v %v", n, a, err)
 	}
 	n, a, err = AgentArgs(remote, "same")
-	if err != nil || n != "ssh" || !reflect.DeepEqual(a, []string{"-o", "BatchMode=yes", "--", "oles@bmo.local", "herdr", "--session", "same", "agent", "list"}) {
+	if err != nil || n != "ssh" || !reflect.DeepEqual(a, []string{"-a", "-o", "BatchMode=yes", "--", "oles@bmo.local", remoteHerdrCommand(remote, "--session", "same", "agent", "list")}) {
 		t.Fatalf("agents %s %#v %v", n, a, err)
 	}
 	n, a, err = InteractiveQueryArgs(remote)
-	if err != nil || n != "ssh" || !reflect.DeepEqual(a, []string{"--", "oles@bmo.local", "herdr", "session", "list", "--json"}) {
+	if err != nil || n != "ssh" || !reflect.DeepEqual(a, []string{"-a", "--", "oles@bmo.local", remoteHerdrCommand(Endpoint{}, "session", "list", "--json")}) {
 		t.Fatalf("interactive query %s %#v %v", n, a, err)
 	}
 }
@@ -150,7 +150,7 @@ func TestExactQueryAndAttachArgs(t *testing.T) {
 func TestIndirectAttachArgsUseProxyJumpWithoutForwardingAgent(t *testing.T) {
 	endpoint := Endpoint{ID: "macmini", NodeID: "bastion/macmini", Label: "Mac Mini", Target: "macmini", Via: []string{"user@bastion"}}
 	name, args, err := AttachArgs(endpoint, "agents")
-	want := []string{"-J", "user@bastion", "-t", "--", "macmini", "herdr", "--session", "agents"}
+	want := []string{"-a", "-J", "user@bastion", "-t", "--", "macmini", remoteHerdrCommand(endpoint, "--session", "agents")}
 	if err != nil || name != "ssh" || !reflect.DeepEqual(args, want) {
 		t.Fatalf("indirect attach = %s %#v err=%v; want ssh %#v", name, args, err, want)
 	}
@@ -166,7 +166,7 @@ func TestSSHAttachArgsUseSelectedSessionForDirectHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"-t", "--", "oles@bmo.local", "herdr", "--session", "coa_bugs"}
+	want := []string{"-a", "-t", "--", "oles@bmo.local", remoteHerdrCommand(Endpoint{}, "--session", "coa_bugs")}
 	if name != "ssh" || !reflect.DeepEqual(args, want) {
 		t.Fatalf("SSH attach = %s %#v; want ssh %#v", name, args, want)
 	}
@@ -285,7 +285,7 @@ func TestClientInteractiveQueryUsesTerminalIOAndParsesNamedSessions(t *testing.T
 	if f.stdin != stdin || f.stderr != stderr {
 		t.Fatal("interactive query did not preserve terminal stdin/stderr")
 	}
-	if f.name != "ssh" || !reflect.DeepEqual(f.args, []string{"--", "oles@bmo.local", "herdr", "session", "list", "--json"}) {
+	if f.name != "ssh" || !reflect.DeepEqual(f.args, []string{"-a", "--", "oles@bmo.local", remoteHerdrCommand(Endpoint{}, "session", "list", "--json")}) {
 		t.Fatalf("interactive command = %s %#v", f.name, f.args)
 	}
 	want := []Session{
@@ -298,7 +298,7 @@ func TestClientInteractiveQueryUsesTerminalIOAndParsesNamedSessions(t *testing.T
 }
 
 func TestClientQueriesFullFederatedInventory(t *testing.T) {
-	f := &queuedExec{results: []ExecResult{{Stdout: []byte(`{"kind":"tatami.hub.inventory","version":1,"host":"bastion","workspaces":[{"name":"API","path":"/srv/api","quick_access":true}],"sessions":[{"name":"agents","running":true}],"hosts":[{"id":"macmini","label":"Mac Mini","target":"macmini"}]}`)}}}
+	f := &queuedExec{results: []ExecResult{{Stdout: []byte("TATAMI-HUB-PROBE 1 inventory\n" + `{"kind":"tatami.hub.inventory","version":1,"host":"bastion","workspaces":[{"name":"API","path":"/srv/api","quick_access":true}],"sessions":[{"name":"agents","running":true}],"hosts":[{"id":"macmini","label":"Mac Mini","target":"macmini"}]}`)}}}
 	endpoint := Endpoint{ID: "bastion", Label: "Bastion", Target: "bastion"}
 	snapshot := NewClient(f).Query(context.Background(), endpoint)
 	if snapshot.State != StateOnline || snapshot.Host != "bastion" || len(snapshot.Workspaces) != 1 || len(snapshot.Sessions) != 1 || len(snapshot.Hosts) != 1 {
@@ -307,7 +307,7 @@ func TestClientQueriesFullFederatedInventory(t *testing.T) {
 	if snapshot.Sessions[0].EndpointID != "bastion" {
 		t.Fatalf("session identity = %#v", snapshot.Sessions[0])
 	}
-	want := []string{"-o", "BatchMode=yes", "--", "bastion", "tatami", "hub", "inventory", "--json"}
+	_, want, _ := ProbeArgs(endpoint, true)
 	if len(f.calls) != 1 || f.calls[0].name != "ssh" || !reflect.DeepEqual(f.calls[0].args, want) {
 		t.Fatalf("inventory calls = %#v", f.calls)
 	}
@@ -315,14 +315,13 @@ func TestClientQueriesFullFederatedInventory(t *testing.T) {
 
 func TestClientFallsBackToHerdrOnlyInventory(t *testing.T) {
 	f := &queuedExec{
-		results: []ExecResult{{Stderr: []byte("tatami: command not found")}, {Stdout: []byte(`{"sessions":[{"name":"agents","running":true}]}`)}},
-		errors:  []error{errors.New("exit status 127"), nil},
+		results: []ExecResult{{Stdout: []byte("TATAMI-HUB-PROBE 1 sessions\n" + `{"sessions":[{"name":"agents","running":true}]}`)}},
 	}
 	snapshot := NewClient(f).Query(context.Background(), Endpoint{ID: "old", Label: "Old Host", Target: "old"})
 	if snapshot.State != StateOnline || len(snapshot.Sessions) != 1 || len(snapshot.Workspaces) != 0 || len(snapshot.Hosts) != 0 {
 		t.Fatalf("fallback snapshot = %#v", snapshot)
 	}
-	if len(f.calls) != 2 || !reflect.DeepEqual(f.calls[1].args, []string{"-o", "BatchMode=yes", "--", "old", "herdr", "session", "list", "--json"}) {
+	if len(f.calls) != 1 || !strings.Contains(f.calls[0].args[len(f.calls[0].args)-1], "TATAMI-HUB-PROBE") {
 		t.Fatalf("fallback calls = %#v", f.calls)
 	}
 }
@@ -338,7 +337,7 @@ func TestClientRejectsSuccessfulMalformedInventoryWithoutFallback(t *testing.T) 
 func TestClientInteractiveFederationUsesJumpRoute(t *testing.T) {
 	stdin := strings.NewReader("terminal authentication")
 	stderr := io.Discard
-	f := &fakeInteractiveExec{out: []byte(`{"kind":"tatami.hub.inventory","version":1,"host":"macmini","sessions":[{"name":"agents","running":true}]}`)}
+	f := &fakeInteractiveExec{out: []byte("TATAMI-HUB-PROBE 1 inventory\n" + `{"kind":"tatami.hub.inventory","version":1,"host":"macmini","sessions":[{"name":"agents","running":true}]}`)}
 	client := NewClientWithExecutors(&fakeExec{}, f)
 	endpoint := Endpoint{ID: "macmini", NodeID: "bastion/macmini", Label: "Mac Mini", Target: "macmini", Via: []string{"bastion"}}
 
@@ -349,7 +348,7 @@ func TestClientInteractiveFederationUsesJumpRoute(t *testing.T) {
 	if snapshot.EndpointID != "bastion/macmini" || snapshot.Host != "macmini" || len(snapshot.Sessions) != 1 {
 		t.Fatalf("interactive snapshot = %#v", snapshot)
 	}
-	want := []string{"-J", "bastion", "--", "macmini", "tatami", "hub", "inventory", "--json"}
+	_, want, _ := ProbeArgs(endpoint, false)
 	if f.name != "ssh" || !reflect.DeepEqual(f.args, want) || f.stdin != stdin || f.stderr != stderr {
 		t.Fatalf("interactive command = %s %#v", f.name, f.args)
 	}
@@ -365,8 +364,7 @@ func TestClientEndpointLocalErrors(t *testing.T) {
 func TestClientOnlineInvalidJSONAndTimeoutStates(t *testing.T) {
 	endpoint := Endpoint{ID: "work", Label: "Work", Target: "work"}
 	onlineExec := &queuedExec{
-		results: []ExecResult{{Stderr: []byte("tatami: command not found")}, {Stdout: []byte(`{"sessions":[{"name":"same","running":true}]}`)}},
-		errors:  []error{errors.New("exit status 127"), nil},
+		results: []ExecResult{{Stdout: []byte("TATAMI-HUB-PROBE 1 sessions\n" + `{"sessions":[{"name":"same","running":true}]}`)}},
 	}
 	online := NewClient(onlineExec).Query(context.Background(), endpoint)
 	if online.State != StateOnline || len(online.Sessions) != 1 || online.Sessions[0].EndpointID != "work" {
@@ -384,7 +382,7 @@ func TestClientOnlineInvalidJSONAndTimeoutStates(t *testing.T) {
 	}
 }
 func TestClientClassifiesMissingHerdrFromStderr(t *testing.T) {
-	s := NewClient(&fakeExec{err: errors.New("exit status 127"), stderr: []byte("herdr: command not found")}).Query(context.Background(), Endpoint{ID: "work", Label: "Work", Target: "work"})
+	s := NewClient(&fakeExec{out: []byte("TATAMI-HUB-PROBE 1 missing\n"), err: probeStatus(127)}).Query(context.Background(), Endpoint{ID: "work", Label: "Work", Target: "work"})
 	if s.State != StateIncompatible {
 		t.Fatalf("state=%s", s.State)
 	}
@@ -392,6 +390,7 @@ func TestClientClassifiesMissingHerdrFromStderr(t *testing.T) {
 func TestCacheIsVersionedAndDoesNotPersistErrors(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "cache.json")
 	if err := SaveCache(p, Cache{Snapshots: []Snapshot{{
+		RootID: "work", RootRevision: strings.Repeat("a", 32), RouteFingerprint: strings.Repeat("b", 64),
 		EndpointID: "work",
 		State:      StateOffline,
 		Error:      "secret stderr",
@@ -400,14 +399,14 @@ func TestCacheIsVersionedAndDoesNotPersistErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(p)
-	if strings.Contains(string(b), "secret") || !strings.Contains(string(b), `"version":1`) || !strings.Contains(string(b), "github.com/riidii/tatami") {
+	if strings.Contains(string(b), "secret") || !strings.Contains(string(b), `"version":2`) || !strings.Contains(string(b), "github.com/riidii/tatami") {
 		t.Fatalf("unsafe cache: %s", b)
 	}
 	cache, err := LoadCache(p)
 	if err != nil || cache.Snapshots[0].Workspaces[0].Repository != "github.com/riidii/tatami" {
 		t.Fatalf("cache round trip = %#v err=%v", cache, err)
 	}
-	if err := os.WriteFile(p, []byte(`{"version":2,"snapshots":[]}`), 0600); err != nil {
+	if err := os.WriteFile(p, []byte(`{"version":3,"snapshots":[]}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := LoadCache(p); err == nil {
@@ -430,6 +429,7 @@ func TestLegacyCacheLoadDoesNotRewriteAndUnsafeRepositoryIsRejected(t *testing.T
 	}
 	unsafePath := filepath.Join(t.TempDir(), "unsafe.json")
 	err = SaveCache(unsafePath, Cache{Snapshots: []Snapshot{{
+		RootID: "work", RootRevision: strings.Repeat("a", 32), RouteFingerprint: strings.Repeat("b", 64),
 		EndpointID: "work",
 		State:      StateOnline,
 		Workspaces: []WorkspaceSummary{{Name: "API", Path: "/srv/api", Repository: "https%3A%2F%2Fuser%3Acredential-sentinel%40example.com/org/repo"}},
@@ -441,7 +441,7 @@ func TestLegacyCacheLoadDoesNotRewriteAndUnsafeRepositoryIsRejected(t *testing.T
 
 func TestCacheRejectsUnsafeTerminalData(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "cache.json")
-	data := `{"version":1,"snapshots":[{"endpoint_id":"work","state":"online","sessions":[{"endpoint_id":"work","session_name":"bad\u001b[2J"}]}]}`
+	data := `{"version":2,"snapshots":[{"endpoint_id":"work","root_id":"work","connectivity_revision":"` + strings.Repeat("a", 32) + `","route_fingerprint":"` + strings.Repeat("b", 64) + `","state":"online","sessions":[{"endpoint_id":"work","session_name":"bad\u001b[2J"}]}]}`
 	if err := os.WriteFile(p, []byte(data), 0600); err != nil {
 		t.Fatal(err)
 	}

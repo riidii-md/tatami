@@ -1,129 +1,167 @@
 # Federated Tatami Hub
 
-Tatami's hub is a personal, federated navigator for workspaces and Herdr
-sessions. The local machine is always present. Add a remote machine from the
-home screen with `a`, or edit `~/.config/tatami/herdr-hosts.json`:
+Tatami's hub navigates local and remote workspaces, Herdr sessions, and saved
+downstream hosts. The local machine is always present.
+
+## Saved SSH host setup
+
+In home-screen browse focus, press `a` to add or `e` to edit a saved root.
+
+| Section | Settings |
+|---|---|
+| Host | Alias (display name), group, comma-separated tags |
+| Connection | SSH mode, hostname/OpenSSH alias, username, port, ProxyJump |
+| Credentials | OpenSSH config/agent, password prompt, identity, certificate + identity, security-key/FIDO2 identity |
+| Advanced | Advertised destination, local jump alias, Tatami/Herdr executable overrides |
+
+Explicit mode separates hostname, username and port. Alias mode delegates these
+and credentials to an existing OpenSSH config alias. Existing hosts keep their
+opaque legacy destination until you explicitly change the mode. Internal IDs
+are generated once and survive display-name edits. Groups organize saved
+roots; tags participate in cached search and host detail. Mosh is staged.
+
+Tab/Shift-Tab move among visible fields and Save/Test/Cancel. Arrow keys cycle
+mode/auth choices. Enter advances on a field or invokes an action; Escape
+cancels. Focus follows a scrolling viewport on short terminals.
+
+Save validates and persists without connecting or refreshing. Test performs
+interactive discovery on the unsaved draft, keeping success/failure in the
+form. Save may retain matching Test data. Missing local identity/certificate
+files are reported by Test but may be saved for offline editing. Leading
+`~/` expands locally; relative identity references become absolute at Save.
+
+Legacy files remain readable without rewriting:
 
 ```json
 {"hosts":[{"id":"workbox","label":"Workbox","target":"workbox"}]}
 ```
 
-`target` can be an SSH-config alias, hostname, IP address, a `user@host`
-destination, or Herdr's `ssh://user@host:port` form. It is always passed as an
-argument and is never treated as a shell command. For a specific key, define an
-alias in `~/.ssh/config`:
+Opaque targets support aliases, hosts, IPs, `user@host`, and
+`ssh://user@host:port`. They are arguments, never shell commands.
 
-```sshconfig
-Host macmini
-  HostName bmo.local
-  User oles
-  IdentityFile ~/.ssh/id_ed25519
-  IdentitiesOnly yes
-```
+## Authentication and bastions
 
-Then use `macmini` as the Tatami destination. Tatami stores no SSH passwords,
-key passphrases, or private-key material.
+OpenSSH owns password, passphrase, host-key, and security-key PIN/touch
+interaction. Tatami stores no passwords, passphrases, or key contents.
+`Password prompt (not stored)` prefers password/keyboard-interactive for the
+final destination. OpenSSH may make multiple attempts; no one-prompt guarantee
+is made. Status 255 alone does not prove password rejection: it can be an SSH
+failure or a remote command's exit status.
 
-## What a remote machine exposes
-
-A current Tatami installation answers the versioned, read-only command:
-
-```sh
-tatami hub inventory --json
-```
-
-After discovery, the remote machine remains inside the normal home screen and
-shows its:
-
-- Quick Access workspaces
-- Tatami projects and folders
-- named Herdr sessions
-- saved downstream Tatami hosts
-
-The inventory contains only the display and connection metadata required to
-navigate. It excludes SSH key paths, layout commands, agent command arguments,
-pane contents, prompts, terminal frames, and credentials. An older remote
-without the inventory command falls back to a Herdr-session-only view.
-
-## Authentication and refresh
-
-Background discovery uses `ssh -o BatchMode=yes`, so it never takes over the
-TUI with a password prompt. A host that needs authentication is marked
-`authentication-needed`. Highlight it and press `Enter`; OpenSSH then owns the
-terminal and may ask for an account password or encrypted-key passphrase. When
-the command completes, Tatami stays on its main screen and expands the newly
-discovered content.
-
-Passwords work for interactive discovery and opening. For automatic background
-refresh, configure non-interactive SSH. Load an encrypted key into your agent:
+Background queries use `BatchMode=yes` and do not take over the terminal.
+Highlight an unavailable host and press Enter for interactive discovery;
+failure leaves endpoint-local guidance and a usable home list. For unattended
+refresh, configure non-interactive SSH:
 
 ```sh
 ssh-add ~/.ssh/private-key
-```
-
-Or install the public key once:
-
-```sh
 ssh-copy-id user@host
 ssh -o BatchMode=yes user@host true
 ```
 
-For a downstream host, Tatami shows the equivalent `ProxyJump` form in the
-on-screen authentication help.
+If you first SSH to a bastion and run Tatami there, authentication originates
+on the bastion. Your laptop's `-i ~/.ssh/pi_key` does not configure the
+bastion's downstream connection. Configure downstream identities/agent/aliases
+on the machine running the visible Tatami process.
 
-When Tatami itself is launched from a Herdr-managed pane, opening a remote
-session uses a direct SSH terminal command such as
-`ssh -t host herdr --session coa_bugs`. This preserves the exact highlighted
-session name and avoids asking the local Herdr client to launch a forbidden
-nested client. Outside Herdr, Tatami continues to use Herdr's native remote
-client.
+For per-hop credentials, use local OpenSSH config:
 
-## Bastions and downstream hosts
-
-Discovery is lazy. Tatami contacts only hosts you have explicitly opened; it
-does not automatically authenticate to every machine found on a remote. If a
-laptop knows `bastion`, and the Tatami installation on `bastion` knows
-`macmini`, opening `bastion` reveals `macmini` as a child. Opening that child
-uses local OpenSSH ProxyJump:
-
-```sh
-ssh -J bastion macmini
+```sshconfig
+Host bastion-hop
+  HostName bastion.local
+  User oles
+  IdentityFile ~/.ssh/pi_key
+  IdentitiesOnly yes
 ```
 
-Longer saved chains work the same way, up to four SSH hops. Tatami detects
-repeated host IDs or targets as cycles. All hop credentials remain on the
-machine running the visible Tatami process: Tatami never enables `ssh -A` or
-`ForwardAgent`. Remote Herdr sessions, workspaces, and new panes/tabs all
-preserve the selected route. Federated inventory intentionally omits layout
-commands, so a discovered workspace opens without executing remote-supplied
-layout automation.
+Final-destination key/certificate options do not configure ProxyJump
+subprocesses. Credential-bearing explicit roots need their Advanced Jump alias
+set to such a configured alias before opening descendants. Alias-mode roots
+already supply an alias. Root credentials are never applied to another child.
+An advertised destination makes a local alias profile projectable to peers;
+an alias without one is local-only. Authentication references are never shared.
 
-## Controls and cache
+## One-connection remote discovery
 
-- Type immediately to search currently known hosts, workspaces, sessions, safe
-  cached agent metadata, paths/folders, and sanitized repository identities.
-- `↓` enters browse focus on the first full or filtered result. `/` returns to
-  search focus; `Esc` clears the query before performing normal back behavior.
-- In browse focus, `Enter` expands an online host,
-  authenticates/discovers an unavailable host, or opens the selected
-  workspace/session. `Space` collapses or expands a host without connecting.
-- In browse focus, `r` refreshes the selected host, `R` refreshes saved
-  top-level hosts, and `a`, `e`, and `d` manage top-level saved hosts.
-  Downstream hosts are managed on the Tatami installation that owns them.
-- Typing never starts SSH discovery, Git inspection, Herdr listing, or remote
-  agent queries. Results describe known cached data and retain loading, stale,
-  offline, and undiscovered boundaries.
+A fixed POSIX dispatcher searches Tatami first, then Herdr only if Tatami is
+absent, inside one SSH process. A selected executable failure never reconnects
+or falls back. A Tatami installation lacking the inventory command needs an
+upgrade.
 
-The private inventory cache lives at
-`$XDG_STATE_HOME/tatami/herdr-hub.json` with mode `0600`. Cached successful data
-may remain visible as stale while a host is unreachable. Remote rows are
-navigation-only; destructive session and workspace operations remain local.
-Remote CPU and RAM are unavailable until Herdr defines a compatible read-only
-metrics capability.
+Executable overrides take precedence; use an absolute remote POSIX path
+containing only letters, numbers and `/ . _ + ~ -`. Use a safe symlink for other
+paths. An invalid override is an explicit configuration
+error. Otherwise search remote PATH, `$HOME/go/bin`, `$HOME/.local/bin`,
+`/usr/local/bin`, then `/opt/homebrew/bin`. No interactive startup files are
+sourced. SSH Herdr attach/agent commands use the same resolver.
 
-Federated inventory version 1 may include an optional `repository` display
-identity such as `github.com/owner/repository`. The Tatami instance that owns
-the workspace derives it locally and removes credentials, transport usernames,
-query strings, fragments, ports, and the trailing `.git` before validation,
-caching, federation, or rendering. Raw origin URLs are never shared. Older
-version-1 writers omit the field and older JSON readers ignore it.
+Unexpected startup output, incompatible JSON, excessive output, missing tools
+and selected-tool failures produce safe guidance, not raw saved stderr.
+
+## Federation and opening
+
+Current Tatami peers expose `tatami hub inventory --json`. Discovery expands
+the normal home screen with Quick Access, projects/folders, named Herdr
+sessions and saved downstream hosts. Herdr-only peers expose a session-only
+view. Inventory excludes local auth references, key paths, layout commands,
+agent arguments, pane contents, prompts and terminal frames.
+
+Descendants are opened lazily using local ProxyJump, up to four hosts total.
+For example, `ssh -J bastion-hop child`. Cyclic IDs or destinations are
+rejected. Shared SSH commands disable agent forwarding with `-a`, even when
+OpenSSH config enables it. Workspaces, sessions,
+new panes and tabs preserve their selected route; discovered workspaces never
+execute remote-supplied layout automation.
+
+Structured profiles attach over SSH to preserve username, port and auth
+settings. Inside a Herdr pane, selected remote named sessions also attach
+over SSH to avoid a forbidden nested local Herdr client. Outside Herdr,
+direct legacy opaque hosts retain native Herdr remote-client compatibility.
+
+Before a hub action is handed off, known route changes invalidate it and
+captured auth settings are removed. Main re-resolves the saved root before
+direct/mux/typed/clipboard execution; changed/deleted roots require reopening
+Tatami.
+
+## Controls and private cache
+
+- Type to search known hosts, workspaces, sessions, groups/tags, safe cached
+  agent metadata, paths/folders, and sanitized repository identities.
+- Down enters browse focus; slash returns to search. Escape clears the query
+  before normal Back behavior. Typing never starts network discovery.
+- Enter expands an online host, discovers an unavailable host, or opens a
+  selected workspace/session. Space only collapses/expands.
+- `r` refreshes the selected host; `R` refreshes saved roots. `a/e/d`
+  manage top-level hosts. Downstream hosts are managed by their owning peer.
+- Remote rows are navigation-only. Destructive operations remain local.
+  Remote CPU/RAM remain unavailable without a compatible Herdr capability.
+
+The cache is `$XDG_STATE_HOME/tatami/herdr-hub.json`, mode 0600. Version 1
+is disposable and discarded in memory. Malformed current caches are preserved
+with writes disabled. Version 2 binds content to saved-root revision and
+effective route, restoring only reachable matching data as stale. Root edits,
+deletion/re-add and child retargets purge previous-host data and reject delayed
+replies. After a failed topology cache write and restart, unchanged-root/
+same-route child data may recover as stale until fresh parent discovery.
+Durable advertised-child tombstones are not maintained.
+
+Inventory version 1 may include optional sanitized `repository` display
+identity such as `github.com/owner/repository`. Owners remove credentials,
+transport usernames, query strings, fragments, ports and trailing `.git`
+before sharing. Old peers may omit/ignore the field; raw origin URLs are never
+shared.
+
+## Migration and rollback
+
+Saved hosts use private schema version 2. Reads do not rewrite v1. The first
+successful v2 save publishes a completed no-overwrite mode-0600
+`herdr-hosts.json.v1.bak` before replacing configuration. Partial,
+non-private, symlinked or different existing backups block migration rather
+than being overwritten. Configuration and cache are separate files, not a
+cross-file transaction; persisted root revisions prevent old-root restoration
+even when cache persistence fails.
+
+To roll back, stop Tatami, preserve the v2 file and restore the backup as
+`herdr-hosts.json`. Old readers can read projectable v2 ID/label/target
+entries, but an old writer drops new fields. Restoring the original backup also
+removes subsequently added hosts.

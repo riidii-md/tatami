@@ -3,6 +3,7 @@ package herdrhub
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/OleksandrBesan/tatami/internal/sshconn"
 )
 
 const LocalEndpointID = "local"
@@ -38,10 +41,18 @@ const (
 )
 
 type Endpoint struct {
-	ID     string       `json:"id"`
-	Label  string       `json:"label"`
-	Kind   EndpointKind `json:"kind,omitempty"`
-	Target string       `json:"target,omitempty"`
+	RootID           string              `json:"-"`
+	RootRevision     string              `json:"-"`
+	Profile          *SavedHost          `json:"-"`
+	Group            string              `json:"-"`
+	Tags             []string            `json:"-"`
+	Connection       *sshconn.Connection `json:"-"`
+	TatamiExecutable string              `json:"-"`
+	HerdrExecutable  string              `json:"-"`
+	ID               string              `json:"id"`
+	Label            string              `json:"label"`
+	Kind             EndpointKind        `json:"kind,omitempty"`
+	Target           string              `json:"target,omitempty"`
 	// NodeID and Via are local routing state. They are never accepted from or
 	// emitted to a remote host inventory.
 	NodeID string   `json:"-"`
@@ -75,15 +86,20 @@ type Agent struct {
 	CWD    string
 }
 type Snapshot struct {
-	EndpointID  string             `json:"endpoint_id"`
-	State       EndpointState      `json:"state"`
-	Host        string             `json:"host,omitempty"`
-	Workspaces  []WorkspaceSummary `json:"workspaces,omitempty"`
-	Sessions    []Session          `json:"sessions"`
-	Hosts       []Endpoint         `json:"hosts,omitempty"`
-	LastSuccess time.Time          `json:"last_success,omitempty"`
-	Latency     time.Duration      `json:"latency,omitempty"`
-	Error       string             `json:"-"`
+	RootID           string             `json:"root_id"`
+	RootRevision     string             `json:"connectivity_revision"`
+	RouteFingerprint string             `json:"route_fingerprint"`
+	Failure          FailureKind        `json:"-"`
+	Legacy           bool               `json:"-"`
+	EndpointID       string             `json:"endpoint_id"`
+	State            EndpointState      `json:"state"`
+	Host             string             `json:"host,omitempty"`
+	Workspaces       []WorkspaceSummary `json:"workspaces,omitempty"`
+	Sessions         []Session          `json:"sessions"`
+	Hosts            []Endpoint         `json:"hosts,omitempty"`
+	LastSuccess      time.Time          `json:"last_success,omitempty"`
+	Latency          time.Duration      `json:"latency,omitempty"`
+	Error            string             `json:"-"`
 }
 
 func LocalEndpoint() Endpoint {
@@ -220,89 +236,13 @@ func validateDisplayField(name, value string, max int) error {
 type Store struct{ path string }
 
 func NewStore(path string) *Store { return &Store{path: path} }
-func (s *Store) List() ([]Endpoint, error) {
-	b, err := os.ReadFile(s.path)
-	if errors.Is(err, os.ErrNotExist) {
-		return []Endpoint{LocalEndpoint()}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var data struct {
-		Hosts []Endpoint `json:"hosts"`
-	}
-	if err := json.Unmarshal(b, &data); err != nil {
-		return nil, fmt.Errorf("read Herdr hosts config: %w", err)
-	}
-	seen := map[string]bool{LocalEndpointID: true}
-	out := []Endpoint{LocalEndpoint()}
-	for _, e := range data.Hosts {
-		e.Kind = EndpointSSH
-		if err := ValidateEndpoint(e); err != nil {
-			return nil, err
-		}
-		if seen[e.ID] {
-			return nil, fmt.Errorf("duplicate endpoint id %q", e.ID)
-		}
-		seen[e.ID] = true
-		out = append(out, e)
-	}
-	return out, nil
-}
-func (s *Store) Save(endpoints []Endpoint) error {
-	seen := map[string]bool{LocalEndpointID: true}
-	hosts := make([]Endpoint, 0, len(endpoints))
-	for _, e := range endpoints {
-		if e.ID == LocalEndpointID {
-			continue
-		}
-		e.Kind = EndpointSSH
-		if err := ValidateEndpoint(e); err != nil {
-			return err
-		}
-		if seen[e.ID] {
-			return fmt.Errorf("duplicate endpoint id %q", e.ID)
-		}
-		seen[e.ID] = true
-		hosts = append(hosts, e)
-	}
-	b, err := json.MarshalIndent(struct {
-		Hosts []Endpoint `json:"hosts"`
-	}{hosts}, "", "  ")
-	if err != nil {
-		return err
-	}
-	return atomicWrite(s.path, append(b, '\n'))
-}
-func (s *Store) Delete(id string) error {
-	if id == LocalEndpointID {
-		return errors.New("local endpoint cannot be deleted")
-	}
-	eps, err := s.List()
-	if err != nil {
-		return err
-	}
-	out := make([]Endpoint, 0, len(eps))
-	found := false
-	for _, e := range eps {
-		if e.ID == id {
-			found = true
-			continue
-		}
-		out = append(out, e)
-	}
-	if !found {
-		return fmt.Errorf("endpoint %q not found", id)
-	}
-	return s.Save(out)
-}
 
 type Cache struct {
 	Version   int        `json:"version"`
 	Snapshots []Snapshot `json:"snapshots"`
 }
 
-const CacheVersion = 1
+const CacheVersion = 2
 const MaxCacheSnapshots = 4096
 
 func LoadCache(path string) (Cache, error) {
@@ -316,6 +256,9 @@ func LoadCache(path string) (Cache, error) {
 	var c Cache
 	if err := json.Unmarshal(b, &c); err != nil {
 		return Cache{}, fmt.Errorf("read Herdr hub cache: %w", err)
+	}
+	if c.Version == 1 {
+		return Cache{}, nil
 	}
 	if c.Version != CacheVersion {
 		return Cache{}, fmt.Errorf("unsupported Herdr hub cache version %d", c.Version)
@@ -344,6 +287,25 @@ func validateCache(c Cache) error {
 	seenSnapshots := make(map[string]bool, len(c.Snapshots))
 	for i := range c.Snapshots {
 		snapshot := &c.Snapshots[i]
+		if snapshot.RootID == "" || snapshot.RootRevision == "" || len(snapshot.RouteFingerprint) != 64 {
+			return errors.New("cached endpoint connection binding is required")
+		}
+		if err := ValidateEndpoint(Endpoint{ID: snapshot.RootID, Label: "Cached root", Target: "validation"}); err != nil {
+			return errors.New("cached root identity is invalid")
+		}
+		revision, err := hex.DecodeString(snapshot.RootRevision)
+		if err != nil || len(revision) != 16 && len(revision) != 32 {
+			return errors.New("cached root revision is invalid")
+		}
+		if _, err := hex.DecodeString(snapshot.RouteFingerprint); err != nil {
+			return errors.New("cached route fingerprint is invalid")
+		}
+		if snapshot.EndpointID != snapshot.RootID && !strings.HasPrefix(snapshot.EndpointID, snapshot.RootID+"/") {
+			return errors.New("cached endpoint does not belong to its root")
+		}
+		if err := validateDisplayField("cached root revision", snapshot.RootRevision, 128); err != nil {
+			return err
+		}
 		if strings.TrimSpace(snapshot.EndpointID) == "" {
 			return errors.New("cached endpoint id is required")
 		}
@@ -408,13 +370,20 @@ func atomicWrite(path string, b []byte) error {
 		f.Close()
 		return err
 	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
 	if err := f.Close(); err != nil {
 		return err
 	}
 	return os.Rename(name, path)
 }
 
-type ExecResult struct{ Stdout, Stderr []byte }
+type ExecResult struct {
+	Stdout, Stderr                   []byte
+	StdoutTruncated, StderrTruncated bool
+}
 type Executor interface {
 	Output(context.Context, string, ...string) (ExecResult, error)
 }
@@ -445,30 +414,36 @@ func (w *boundedOutput) Write(p []byte) (int, error) {
 }
 
 func (OSExecutor) Output(ctx context.Context, name string, args ...string) (ExecResult, error) {
-	stdout := &boundedOutput{limit: 2 << 20}
+	stdout := &boundedOutput{limit: (2 << 20) + 128}
 	stderr := &boundedOutput{limit: 4096}
 	command := exec.CommandContext(ctx, name, args...)
 	command.Stdout = stdout
 	command.Stderr = stderr
 	err := command.Run()
-	if stdout.truncated && err == nil {
-		err = errors.New("Herdr inventory output exceeded 2 MiB")
+	if stdout.truncated {
+		err = errors.Join(err, errors.New("Herdr inventory output exceeded 2 MiB"))
 	}
-	return ExecResult{Stdout: stdout.data, Stderr: stderr.data}, err
+	if stderr.truncated {
+		err = errors.Join(err, errors.New("Herdr diagnostic output exceeded 4 KiB"))
+	}
+	return ExecResult{Stdout: stdout.data, Stderr: stderr.data, StdoutTruncated: stdout.truncated, StderrTruncated: stderr.truncated}, err
 }
 
 func (OSInteractiveExecutor) OutputInteractive(ctx context.Context, stdin io.Reader, stderr io.Writer, name string, args ...string) (ExecResult, error) {
-	stdout := &boundedOutput{limit: 2 << 20}
+	stdout := &boundedOutput{limit: (2 << 20) + 128}
 	stderrCapture := &boundedOutput{limit: 4096}
 	command := exec.CommandContext(ctx, name, args...)
 	command.Stdin = stdin
 	command.Stdout = stdout
 	command.Stderr = io.MultiWriter(stderr, stderrCapture)
 	err := command.Run()
-	if stdout.truncated && err == nil {
-		err = errors.New("Herdr inventory output exceeded 2 MiB")
+	if stdout.truncated {
+		err = errors.Join(err, errors.New("Herdr inventory output exceeded 2 MiB"))
 	}
-	return ExecResult{Stdout: stdout.data, Stderr: stderrCapture.data}, err
+	if stderrCapture.truncated {
+		err = errors.Join(err, errors.New("Herdr diagnostic output exceeded 4 KiB"))
+	}
+	return ExecResult{Stdout: stdout.data, Stderr: stderrCapture.data, StdoutTruncated: stdout.truncated, StderrTruncated: stderrCapture.truncated}, err
 }
 
 type Client struct {
@@ -493,29 +468,13 @@ func QueryArgs(e Endpoint) (string, []string, error) {
 	if e.ID == LocalEndpointID || e.Kind == EndpointLocal {
 		return "herdr", []string{"session", "list", "--json"}, nil
 	}
-	if err := validateRoutedEndpoint(e); err != nil {
-		return "", nil, err
-	}
-	args := []string{"-o", "BatchMode=yes"}
-	if len(e.Via) > 0 {
-		args = append(args, "-J", strings.Join(e.Via, ","))
-	}
-	args = append(args, "--", e.Target, "herdr", "session", "list", "--json")
-	return "ssh", args, nil
+	return endpointCommand(e, sshconn.Background, remoteHerdrCommand(e, "session", "list", "--json"))
 }
 func InteractiveQueryArgs(e Endpoint) (string, []string, error) {
 	if e.ID == LocalEndpointID || e.Kind == EndpointLocal {
 		return "herdr", []string{"session", "list", "--json"}, nil
 	}
-	if err := validateRoutedEndpoint(e); err != nil {
-		return "", nil, err
-	}
-	args := make([]string, 0, 10)
-	if len(e.Via) > 0 {
-		args = append(args, "-J", strings.Join(e.Via, ","))
-	}
-	args = append(args, "--", e.Target, "herdr", "session", "list", "--json")
-	return "ssh", args, nil
+	return endpointCommand(e, sshconn.Interactive, remoteHerdrCommand(e, "session", "list", "--json"))
 }
 func AttachArgs(e Endpoint, session string) (string, []string, error) {
 	if strings.TrimSpace(session) == "" {
@@ -530,7 +489,7 @@ func AttachArgs(e Endpoint, session string) (string, []string, error) {
 	if err := validateRemoteSessionName(session); err != nil {
 		return "", nil, err
 	}
-	if len(e.Via) > 0 {
+	if len(e.Via) > 0 || e.Connection != nil {
 		return SSHAttachArgs(e, session)
 	}
 	return "herdr", []string{"--remote", e.Target, "--session", session}, nil
@@ -552,12 +511,7 @@ func SSHAttachArgs(e Endpoint, session string) (string, []string, error) {
 	if err := validateRemoteSessionName(session); err != nil {
 		return "", nil, err
 	}
-	args := make([]string, 0, 9)
-	if len(e.Via) > 0 {
-		args = append(args, "-J", strings.Join(e.Via, ","))
-	}
-	args = append(args, "-t", "--", e.Target, "herdr", "--session", session)
-	return "ssh", args, nil
+	return endpointCommand(e, sshconn.Attach, remoteHerdrCommand(e, "--session", session))
 }
 func AgentArgs(e Endpoint, session string) (string, []string, error) {
 	if strings.TrimSpace(session) == "" {
@@ -572,12 +526,7 @@ func AgentArgs(e Endpoint, session string) (string, []string, error) {
 	if err := validateRemoteSessionName(session); err != nil {
 		return "", nil, err
 	}
-	args := []string{"-o", "BatchMode=yes"}
-	if len(e.Via) > 0 {
-		args = append(args, "-J", strings.Join(e.Via, ","))
-	}
-	args = append(args, "--", e.Target, "herdr", "--session", session, "agent", "list")
-	return "ssh", args, nil
+	return endpointCommand(e, sshconn.Background, remoteHerdrCommand(e, "--session", session, "agent", "list"))
 }
 func (c *Client) QueryAgents(ctx context.Context, e Endpoint, session string) ([]Agent, error) {
 	name, args, err := AgentArgs(e, session)
@@ -602,7 +551,19 @@ func (c *Client) QueryInteractive(ctx context.Context, e Endpoint, stdin io.Read
 	return ParseSessions(e.Key(), result.Stdout)
 }
 
-func (c *Client) QueryInventoryInteractive(ctx context.Context, e Endpoint, stdin io.Reader, stderr io.Writer) (Snapshot, error) {
+func (c *Client) QueryInventoryInteractive(ctx context.Context, e Endpoint, stdin io.Reader, stderr io.Writer) (snapshot Snapshot, queryError error) {
+	defer func() { snapshot = StampSnapshot(e, snapshot) }()
+	if e.ID != LocalEndpointID && e.Kind != EndpointLocal {
+		start := time.Now()
+		name, args, err := ProbeArgs(e, false)
+		if err != nil {
+			return Snapshot{}, err
+		}
+		result, queryErr := c.interactive.OutputInteractive(ctx, stdin, stderr, name, args...)
+		snapshot, err := parseProbe(ctx, e, result, queryErr)
+		snapshot.Latency = time.Since(start)
+		return snapshot, err
+	}
 	start := time.Now()
 	name, args, err := InventoryQueryArgs(e, false)
 	if err != nil {
@@ -665,7 +626,26 @@ func ParseAgents(data []byte) ([]Agent, error) {
 	}
 	return out, nil
 }
-func (c *Client) Query(ctx context.Context, e Endpoint) Snapshot {
+func (c *Client) Query(ctx context.Context, e Endpoint) (snapshot Snapshot) {
+	defer func() { snapshot = StampSnapshot(e, snapshot) }()
+	if e.ID != LocalEndpointID && e.Kind != EndpointLocal {
+		start := time.Now()
+		name, args, err := ProbeArgs(e, true)
+		if err != nil {
+			return Snapshot{EndpointID: e.Key(), State: StateIncompatible, Error: "Invalid saved SSH connection; edit this host."}
+		}
+		result, queryErr := c.exec.Output(ctx, name, args...)
+		snapshot, err := parseProbe(ctx, e, result, queryErr)
+		if err != nil {
+			var query *QueryError
+			if errors.As(err, &query) {
+				return Snapshot{EndpointID: e.Key(), State: query.State(), Failure: query.Kind, Error: query.Error(), Latency: time.Since(start)}
+			}
+			return Snapshot{EndpointID: e.Key(), State: StateIncompatible, Error: "Remote discovery failed."}
+		}
+		snapshot.Latency = time.Since(start)
+		return snapshot
+	}
 	start := time.Now()
 	name, args, err := InventoryQueryArgs(e, true)
 	if err != nil {
@@ -700,6 +680,10 @@ func (c *Client) Query(ctx context.Context, e Endpoint) Snapshot {
 }
 
 func snapshotFromInventory(endpoint Endpoint, inventory Inventory, latency time.Duration) Snapshot {
+	hosts := make([]Endpoint, 0, len(inventory.Hosts))
+	for _, host := range inventory.Hosts {
+		hosts = append(hosts, host.Endpoint())
+	}
 	sessions := make([]Session, 0, len(inventory.Sessions))
 	for _, session := range inventory.Sessions {
 		sessions = append(sessions, Session{
@@ -714,12 +698,21 @@ func snapshotFromInventory(endpoint Endpoint, inventory Inventory, latency time.
 		Host:        inventory.Host,
 		Workspaces:  append([]WorkspaceSummary(nil), inventory.Workspaces...),
 		Sessions:    sessions,
-		Hosts:       append([]Endpoint(nil), inventory.Hosts...),
+		Hosts:       hosts,
 		LastSuccess: time.Now().UTC(),
 		Latency:     latency,
 	}
 }
 func ParseSessions(endpointID string, b []byte) ([]Session, error) {
+	var shape map[string]json.RawMessage
+	if err := json.Unmarshal(b, &shape); err != nil || shape == nil {
+		return nil, errors.New("Herdr sessions must be an object")
+	}
+	array, ok := shape["sessions"]
+	if !ok || string(array) == "null" || len(array) == 0 || array[0] != '[' {
+		return nil, errors.New("Herdr sessions array is required")
+	}
+
 	var v struct {
 		Sessions []struct {
 			Name    string `json:"name"`
@@ -730,9 +723,15 @@ func ParseSessions(endpointID string, b []byte) ([]Session, error) {
 	if err := json.Unmarshal(b, &v); err != nil {
 		return nil, fmt.Errorf("parse Herdr sessions: %w", err)
 	}
+	if len(v.Sessions) > MaxInventorySessions {
+		return nil, errors.New("Herdr sessions exceed supported limits")
+	}
 	out := make([]Session, 0, len(v.Sessions))
 	for _, x := range v.Sessions {
-		if strings.TrimSpace(x.Name) != "" {
+		if strings.TrimSpace(x.Name) == "" {
+			return nil, errors.New("Herdr session name is required")
+		}
+		{
 			if err := validateRemoteSessionName(x.Name); err != nil {
 				return nil, fmt.Errorf("parse Herdr session name: %w", err)
 			}
@@ -789,7 +788,7 @@ func RefreshWithTimeout(ctx context.Context, client *Client, endpoints []Endpoin
 				snapshot := client.Query(endpointCtx, job.endpoint)
 				cancel()
 				if snapshot.State != StateOnline {
-					if old, ok := prior[job.endpoint.Key()]; ok && (len(old.Sessions) > 0 || len(old.Workspaces) > 0 || len(old.Hosts) > 0) {
+					if old, ok := prior[job.endpoint.Key()]; ok && SnapshotMatches(job.endpoint, old) && (len(old.Sessions) > 0 || len(old.Workspaces) > 0 || len(old.Hosts) > 0) {
 						snapshot.Host = old.Host
 						snapshot.Workspaces = old.Workspaces
 						snapshot.Sessions = old.Sessions

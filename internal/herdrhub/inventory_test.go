@@ -53,7 +53,7 @@ func TestBuildInventoryExportsFullNavigationWithoutSecretsOrCommands(t *testing.
 	if !reflect.DeepEqual(inventory.Sessions, []SessionSummary{{Name: "default", Running: true, Default: true}, {Name: "agents"}}) {
 		t.Fatalf("sessions = %#v", inventory.Sessions)
 	}
-	wantHosts := []Endpoint{{ID: "macmini", Label: "Mac Mini", Kind: EndpointSSH, Target: "macmini.internal"}}
+	wantHosts := []AdvertisedHost{{ID: "macmini", Label: "Mac Mini", Kind: EndpointSSH, Target: "macmini.internal"}}
 	if !reflect.DeepEqual(inventory.Hosts, wantHosts) {
 		t.Fatalf("hosts = %#v", inventory.Hosts)
 	}
@@ -175,7 +175,7 @@ func TestRouteAwareSSHArgsNeverUseAgentForwarding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"-o", "BatchMode=yes", "-J", "user@bastion", "--", "macmini.internal", "tatami", "hub", "inventory", "--json"}
+	want := []string{"-a", "-o", "BatchMode=yes", "-J", "user@bastion", "--", "macmini.internal", remoteScript(probeScript, "", "")}
 	if name != "ssh" || !reflect.DeepEqual(args, want) {
 		t.Fatalf("inventory query = %s %#v; want ssh %#v", name, args, want)
 	}

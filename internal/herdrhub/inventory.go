@@ -45,7 +45,7 @@ type Inventory struct {
 	Host       string             `json:"host"`
 	Workspaces []WorkspaceSummary `json:"workspaces"`
 	Sessions   []SessionSummary   `json:"sessions"`
-	Hosts      []Endpoint         `json:"hosts"`
+	Hosts      []AdvertisedHost   `json:"hosts"`
 }
 
 func BuildInventory(host string, workspaces []workspace.Workspace, sessions []shell.HerdrSession, endpoints []Endpoint) (Inventory, error) {
@@ -59,7 +59,7 @@ func BuildInventoryWithRepositories(host string, workspaces []workspace.Workspac
 		Host:       host,
 		Workspaces: make([]WorkspaceSummary, 0, len(workspaces)),
 		Sessions:   make([]SessionSummary, 0, len(sessions)),
-		Hosts:      make([]Endpoint, 0, min(len(endpoints), MaxInventoryHosts)),
+		Hosts:      make([]AdvertisedHost, 0, min(len(endpoints), MaxInventoryHosts)),
 	}
 	if len(workspaces) > MaxInventoryWorkspaces || len(sessions) > MaxInventorySessions || len(endpoints) > MaxInventoryHosts+1 {
 		return Inventory{}, errors.New("Tatami inventory exceeds supported limits")
@@ -92,13 +92,13 @@ func BuildInventoryWithRepositories(host string, workspaces []workspace.Workspac
 		if endpoint.ID == LocalEndpointID {
 			continue
 		}
-		endpoint.NodeID = ""
-		endpoint.Via = nil
-		endpoint.Kind = EndpointSSH
-		if err := ValidateEndpoint(endpoint); err != nil {
+		advertised, projectable, err := projectEndpoint(endpoint)
+		if err != nil {
 			return Inventory{}, err
 		}
-		inventory.Hosts = append(inventory.Hosts, endpoint)
+		if projectable {
+			inventory.Hosts = append(inventory.Hosts, advertised)
+		}
 	}
 	if len(inventory.Hosts) > MaxInventoryHosts {
 		return Inventory{}, errors.New("Tatami host inventory exceeds supported limits")
@@ -139,7 +139,7 @@ func ParseInventory(data []byte) (Inventory, error) {
 	seen := make(map[string]bool, len(inventory.Hosts))
 	for i := range inventory.Hosts {
 		inventory.Hosts[i].Kind = EndpointSSH
-		if err := ValidateEndpoint(inventory.Hosts[i]); err != nil {
+		if err := ValidateEndpoint(inventory.Hosts[i].Endpoint()); err != nil {
 			return Inventory{}, fmt.Errorf("unsafe inventory host: %w", err)
 		}
 		if seen[inventory.Hosts[i].ID] {
@@ -216,7 +216,14 @@ func DescendantEndpoint(parent, child Endpoint) (Endpoint, error) {
 		}
 	}
 	child.NodeID = parent.Key() + "/" + child.ID
-	child.Via = append(append([]string(nil), parent.Via...), parent.Target)
+	hop, err := JumpDestination(parent)
+	if err != nil {
+		return Endpoint{}, err
+	}
+	child.Via = append(append([]string(nil), parent.Via...), hop)
+	child.RootID, child.RootRevision = parent.RootID, parent.RootRevision
+	child.Profile, child.Connection = nil, nil
+	child.TatamiExecutable, child.HerdrExecutable = "", ""
 	return child, nil
 }
 
@@ -246,16 +253,5 @@ func InventoryQueryArgs(endpoint Endpoint, batch bool) (string, []string, error)
 	if endpoint.ID == LocalEndpointID || endpoint.Kind == EndpointLocal {
 		return "tatami", []string{"hub", "inventory", "--json"}, nil
 	}
-	if err := validateRoutedEndpoint(endpoint); err != nil {
-		return "", nil, err
-	}
-	args := make([]string, 0, 12)
-	if batch {
-		args = append(args, "-o", "BatchMode=yes")
-	}
-	if len(endpoint.Via) > 0 {
-		args = append(args, "-J", strings.Join(endpoint.Via, ","))
-	}
-	args = append(args, "--", endpoint.Target, "tatami", "hub", "inventory", "--json")
-	return "ssh", args, nil
+	return ProbeArgs(endpoint, batch)
 }

@@ -142,7 +142,10 @@ func (z *ZellijRunner) NewTabSSH(host, key, remotePath, name string) error {
 
 // NewTabSSHRemote opens a new tab using the complete remote route.
 func (z *ZellijRunner) NewTabSSHRemote(remote *workspace.Remote, name string) error {
-	sshCmd := BuildRemoteSSHCommand(remote, "")
+	sshCmd, err := BuildRemoteSSHCommand(remote, "")
+	if err != nil {
+		return err
+	}
 
 	args := []string{"action", "new-tab"}
 	if name != "" {
@@ -164,7 +167,10 @@ func (z *ZellijRunner) NewPaneSSH(host, key, remotePath, direction string) error
 
 // NewPaneSSHRemote opens a new pane using the complete remote route.
 func (z *ZellijRunner) NewPaneSSHRemote(remote *workspace.Remote, direction string) error {
-	sshCmd := BuildRemoteSSHCommand(remote, "")
+	sshCmd, err := BuildRemoteSSHCommand(remote, "")
+	if err != nil {
+		return err
+	}
 
 	args := []string{"run"}
 	if direction != "" {
@@ -185,7 +191,10 @@ func (z *ZellijRunner) RunPaneSSH(host, key, remotePath, direction, command stri
 
 // RunPaneSSHRemote opens a new pane through the complete route and runs a command.
 func (z *ZellijRunner) RunPaneSSHRemote(remote *workspace.Remote, direction, command string) error {
-	sshCmd := BuildRemoteSSHCommand(remote, command)
+	sshCmd, err := BuildRemoteSSHCommand(remote, command)
+	if err != nil {
+		return err
+	}
 
 	args := []string{"run"}
 	if direction != "" {

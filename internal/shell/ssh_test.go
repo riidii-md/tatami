@@ -15,8 +15,11 @@ func TestBuildRemoteSSHCommandIncludesProxyJumpAndQuotesValues(t *testing.T) {
 		Jump: []string{"user@bastion", "relay"},
 	}
 
-	got := BuildRemoteSSHCommand(remote, "")
-	want := "ssh -i '/keys/team key' -J 'user@bastion,relay' -t -- 'user@macmini' 'cd '\"'\"'/srv/team project'\"'\"' && exec ${SHELL:-/bin/sh}'"
+	got, err := BuildRemoteSSHCommand(remote, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "'ssh' '-a' '-i' '/keys/team key' '-J' 'user@bastion,relay' '-t' '--' 'user@macmini' 'cd '\"'\"'/srv/team project'\"'\"' && exec ${SHELL:-/bin/sh}'"
 	if got != want {
 		t.Fatalf("SSH command = %q; want %q", got, want)
 	}
@@ -27,8 +30,11 @@ func TestBuildRemoteSSHCommandIncludesProxyJumpAndQuotesValues(t *testing.T) {
 
 func TestBuildRemoteSSHCommandRunsLayoutCommandAfterChangingDirectory(t *testing.T) {
 	remote := &workspace.Remote{Host: "host", Path: "/srv/project"}
-	got := BuildRemoteSSHCommand(remote, "npm test")
-	want := "ssh -t -- 'host' 'cd '\"'\"'/srv/project'\"'\"' && npm test'"
+	got, err := BuildRemoteSSHCommand(remote, "npm test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "'ssh' '-a' '-t' '--' 'host' 'cd '\"'\"'/srv/project'\"'\"' && npm test'"
 	if got != want {
 		t.Fatalf("SSH command = %q; want %q", got, want)
 	}
