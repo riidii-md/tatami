@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/OleksandrBesan/tatami/internal/herdrhub"
 	appsearch "github.com/OleksandrBesan/tatami/internal/search"
 	"github.com/OleksandrBesan/tatami/internal/shell"
+	"github.com/OleksandrBesan/tatami/internal/sshconn"
 	"github.com/OleksandrBesan/tatami/internal/systemusage"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
 	tea "github.com/charmbracelet/bubbletea"
@@ -32,6 +34,7 @@ type ListItem struct {
 
 // ListView displays the list of workspaces
 type ListView struct {
+	hubNotice             string
 	store                 *workspace.Store
 	items                 []ListItem
 	normalItems           []ListItem
@@ -120,7 +123,7 @@ func (l *ListView) SetHerdrHubSnapshots(endpoints []herdrhub.Endpoint, snapshots
 			l.hubCollapsed[key] = false
 		}
 	}
-	l.hubSnapshots = append([]herdrhub.Snapshot(nil), snapshots...)
+	l.hubSnapshots = herdrhub.ReconcileSnapshots(endpoints, snapshots, false)
 	l.refreshItems()
 	if selectedSession != "" {
 		for i, item := range l.items {
@@ -384,6 +387,9 @@ func (l *ListView) collectHubSearchItems(items *[]ListItem, endpoint herdrhub.En
 	}
 	seen[key] = true
 	snapshot, ok := snapshots[key]
+	if ok && !herdrhub.SnapshotMatches(endpoint, snapshot) {
+		ok = false
+	}
 	if !ok {
 		snapshot = herdrhub.Snapshot{EndpointID: key, State: herdrhub.StateLoading}
 	}
@@ -435,7 +441,11 @@ func remoteWorkspaceListItem(endpoint herdrhub.Endpoint, summary herdrhub.Worksp
 	target := endpoint.Target
 	jump := append([]string(nil), endpoint.Via...)
 	if summary.Target != "" {
-		route := append(append([]string(nil), jump...), endpoint.Target)
+		hop, err := herdrhub.JumpDestination(endpoint)
+		if err != nil {
+			return ListItem{}, false
+		}
+		route := append(append([]string(nil), jump...), hop)
 		route = append(route, summary.Jump...)
 		route = append(route, summary.Target)
 		if len(route) > herdrhub.MaxRouteDepth {
@@ -456,6 +466,13 @@ func remoteWorkspaceListItem(endpoint herdrhub.Endpoint, summary herdrhub.Worksp
 		displayName = summary.Folder + "/" + summary.Name
 	}
 	endpointCopy := endpoint
+	connection := herdrhub.EndpointConnection(endpoint)
+	if target != endpoint.Target || !slices.Equal(jump, endpoint.Via) {
+		connection = sshconn.Connection{Destination: target, Jump: jump}
+	}
+	if err := sshconn.Validate(connection); err != nil {
+		return ListItem{}, false
+	}
 	return ListItem{
 		Type:       "workspace",
 		Name:       displayName + " · " + endpoint.Label,
@@ -465,7 +482,7 @@ func remoteWorkspaceListItem(endpoint herdrhub.Endpoint, summary herdrhub.Worksp
 			Path:        summary.Path,
 			Folder:      summary.Folder,
 			QuickAccess: summary.QuickAccess,
-			Remote:      &workspace.Remote{Host: target, Path: summary.Path, Jump: jump},
+			Remote:      &workspace.Remote{Host: target, Path: summary.Path, Jump: jump, Connection: &connection, Source: herdrhub.EndpointOrigin(endpoint)},
 			Layout:      workspace.Layout{Type: workspace.LayoutNone},
 		},
 		Endpoint: &endpointCopy,
@@ -525,6 +542,10 @@ func (l *ListView) searchDocument(item ListItem, ordinal int) appsearch.Document
 		}
 	}
 	add("type", strings.ReplaceAll(item.Type, "_", " "))
+	if item.Endpoint != nil {
+		add("group", item.Endpoint.Group)
+		add("tags", strings.Join(item.Endpoint.Tags, " "))
+	}
 	switch item.Type {
 	case "workspace":
 		if item.Workspace != nil {
@@ -623,11 +644,34 @@ func (l *ListView) appendHubItems(query string, flat bool) {
 	for _, snapshot := range l.hubSnapshots {
 		snapshots[snapshot.EndpointID] = snapshot
 	}
+	groups := map[string][]herdrhub.Endpoint{}
+	labels := map[string]string{}
 	for _, endpoint := range l.hubEndpointOrder {
 		if endpoint.ID == herdrhub.LocalEndpointID {
 			continue
 		}
-		l.appendHubEndpoint(endpoint, 0, query, flat, snapshots)
+		if endpoint.Group == "" {
+			l.appendHubEndpoint(endpoint, 0, query, flat, snapshots)
+			continue
+		}
+		key := strings.ToLower(endpoint.Group)
+		if _, ok := labels[key]; !ok {
+			labels[key] = endpoint.Group
+		}
+		groups[key] = append(groups[key], endpoint)
+	}
+	keys := make([]string, 0, len(groups))
+	for key := range groups {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if !flat {
+			l.items = append(l.items, ListItem{Type: "remote_header", Name: "  " + labels[key]})
+		}
+		for _, endpoint := range groups[key] {
+			l.appendHubEndpoint(endpoint, 0, query, flat, snapshots)
+		}
 	}
 }
 
@@ -697,6 +741,9 @@ func (l *ListView) appendHubEndpoint(endpoint herdrhub.Endpoint, depth int, quer
 	for _, savedChild := range snapshot.Hosts {
 		child, err := herdrhub.DescendantEndpoint(endpoint, savedChild)
 		if err != nil {
+			if !flat {
+				l.items = append(l.items, ListItem{Type: "remote_header", Name: sectionIndent + "Configure a jump alias to open credential-bearing descendants, or check the route."})
+			}
 			continue
 		}
 		l.appendHubEndpoint(child, depth+1, query, flat, snapshots)
@@ -708,42 +755,17 @@ func (l *ListView) appendRemoteWorkspace(endpoint herdrhub.Endpoint, summary her
 	if summary.Folder != "" {
 		displayName = summary.Folder + "/" + summary.Name
 	}
-	if query != "" && !strings.Contains(strings.ToLower(endpoint.Label+" "+displayName+" "+summary.Path), query) {
+	if query != "" && !strings.Contains(strings.ToLower(endpoint.Label+" "+endpoint.Group+" "+strings.Join(endpoint.Tags, " ")+" "+displayName+" "+summary.Path), query) {
 		return
 	}
-	target := endpoint.Target
-	jump := append([]string(nil), endpoint.Via...)
-	if summary.Target != "" {
-		route := append(append([]string(nil), jump...), endpoint.Target)
-		route = append(route, summary.Jump...)
-		route = append(route, summary.Target)
-		if len(route) > herdrhub.MaxRouteDepth {
-			return
-		}
-		seen := make(map[string]bool, len(route))
-		for _, hop := range route {
-			if seen[hop] {
-				return
-			}
-			seen[hop] = true
-		}
-		jump = append([]string(nil), route[:len(route)-1]...)
-		target = summary.Target
+	item, ok := remoteWorkspaceListItem(endpoint, summary)
+	if !ok {
+		return
 	}
-	ws := &workspace.Workspace{
-		Name:        summary.Name,
-		Path:        summary.Path,
-		Folder:      summary.Folder,
-		QuickAccess: summary.QuickAccess,
-		Remote:      &workspace.Remote{Host: target, Path: summary.Path, Jump: jump},
-		Layout:      workspace.Layout{Type: workspace.LayoutNone},
+	if !flat {
+		item.Name = strings.Repeat("  ", depth) + displayName
 	}
-	name := strings.Repeat("  ", depth) + displayName
-	if flat {
-		name = displayName + " · " + endpoint.Label
-	}
-	endpointCopy := endpoint
-	l.items = append(l.items, ListItem{Type: "workspace", Name: name, Workspace: ws, Endpoint: &endpointCopy})
+	l.items = append(l.items, item)
 }
 
 func hubEndpointStatus(snapshot herdrhub.Snapshot) string {
@@ -769,17 +791,41 @@ func hubAuthenticationGuidance(endpoint *herdrhub.Endpoint, snapshot herdrhub.Sn
 		return "SSH authentication required. Edit this host and enter a valid destination."
 	}
 	jumpOption := ""
-	jumpFlag := ""
 	if len(endpoint.Via) > 0 {
 		route := strings.Join(endpoint.Via, ",")
 		jumpOption = "-o ProxyJump=" + route + " "
-		jumpFlag = "-J " + route + " "
+	}
+	command, err := sshconn.Build(herdrhub.EndpointConnection(*endpoint), sshconn.Background, "true")
+	if err != nil {
+		return "SSH settings are invalid. Edit this host before retrying."
+	}
+	authHint := ""
+	if herdrhub.EndpointConnection(*endpoint).Auth == sshconn.PasswordPrompt {
+		authHint = "\nFor background refresh, change Authentication to an identity or SSH config/agent; password-prompt mode always requires a prompt."
 	}
 	return "[enter]open/authenticate — OpenSSH will ask for password or key passphrase\n" +
 		"Background refresh needs non-interactive SSH\n" +
 		"Encrypted key: ssh-add ~/.ssh/<private-key>\n" +
 		"Install key: ssh-copy-id " + jumpOption + endpoint.Target + "\n" +
-		"Verify refresh: ssh -o BatchMode=yes " + jumpFlag + endpoint.Target + " true"
+		"Verify refresh: " + sshconn.RenderPOSIX(command) + authHint
+}
+
+func hubRouteGuidance(endpoint *herdrhub.Endpoint, snapshot herdrhub.Snapshot) string {
+	if endpoint == nil {
+		return ""
+	}
+	needsHop := len(snapshot.Hosts) > 0
+	for _, ws := range snapshot.Workspaces {
+		if ws.Target != "" {
+			needsHop = true
+		}
+	}
+	if needsHop {
+		if _, err := herdrhub.JumpDestination(*endpoint); err != nil {
+			return err.Error()
+		}
+	}
+	return ""
 }
 
 func (l *ListView) herdrEndpointGuidanceView() string {
@@ -789,7 +835,20 @@ func (l *ListView) herdrEndpointGuidanceView() string {
 	}
 	for _, snapshot := range l.hubSnapshots {
 		if snapshot.EndpointID == selected.Endpoint.Key() {
-			return hubAuthenticationGuidance(selected.Endpoint, snapshot)
+			guidance := hubAuthenticationGuidance(selected.Endpoint, snapshot)
+			if routeGuidance := hubRouteGuidance(selected.Endpoint, snapshot); routeGuidance != "" {
+				guidance = routeGuidance + "\n" + guidance
+			}
+			if snapshot.Error != "" {
+				guidance = snapshot.Error + "\n" + guidance
+			}
+			if selected.Endpoint.Group != "" {
+				guidance += "\nGroup: " + selected.Endpoint.Group
+			}
+			if len(selected.Endpoint.Tags) > 0 {
+				guidance += "\nTags: " + strings.Join(selected.Endpoint.Tags, ", ")
+			}
+			return guidance
 		}
 	}
 	return ""
@@ -1361,6 +1420,9 @@ func (l *ListView) View() string {
 	if l.compact() {
 		padding = lipgloss.NewStyle().Padding(0, 1)
 		contentHeight = l.height
+	}
+	if l.hubNotice != "" {
+		help = l.hubNotice + "\n" + help
 	}
 	content := renderScreenWithFooter(b.String(), helpStyle.Render(help), contentHeight)
 	return padding.Render(content)

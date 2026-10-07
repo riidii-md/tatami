@@ -283,7 +283,7 @@ func TestEnterDiscoversRemoteTatamiAndKeepsUserOnMainScreen(t *testing.T) {
 		t.Fatal("opening remote endpoint did not schedule interactive discovery")
 	}
 
-	app.Update(herdrHubInteractiveInventoryMsg{Endpoint: remote, Snapshot: herdrhub.Snapshot{
+	app.Update(herdrHubInteractiveInventoryMsg{Endpoint: remote, OperationGeneration: app.hubOperationGenerations[remote.Key()], Snapshot: herdrhub.Snapshot{
 		EndpointID: remote.ID,
 		State:      herdrhub.StateOnline,
 		Host:       "work-host",
@@ -521,32 +521,32 @@ func TestHerdrHostAddEditAndConfirmedRemove(t *testing.T) {
 	if app.currentView != ViewHerdrHost {
 		t.Fatalf("add opened view %v", app.currentView)
 	}
-	app.herdrHostView.inputs[0].SetValue("gpu")
-	app.herdrHostView.inputs[1].SetValue("GPU Box")
-	app.herdrHostView.inputs[2].SetValue("gpu")
+	app.herdrHostView.inputs[hostLabel].SetValue("GPU Box")
+	app.herdrHostView.inputs[hostHostname].SetValue("gpu")
+	focusHostAction(app, hostSave)
 	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if len(saved) != 1 || len(saved[0]) != 3 || saved[0][2].ID != "gpu" || cmd == nil {
+	if len(saved) != 1 || len(saved[0]) != 3 || saved[0][2].ID != "gpu-box" || cmd != nil {
 		t.Fatalf("add saved=%#v cmd=%v", saved, cmd)
 	}
-	cmd()
-	if len(tested) != 1 || tested[0].ID != "gpu" {
-		t.Fatalf("save did not test added host: %#v", tested)
+	if len(tested) != 0 {
+		t.Fatalf("save implicitly tested host: %#v", tested)
 	}
 
 	for i, item := range app.listView.items {
-		if item.Type == "herdr_endpoint" && item.Endpoint != nil && item.Endpoint.ID == "gpu" {
+		if item.Type == "herdr_endpoint" && item.Endpoint != nil && item.Endpoint.ID == "gpu-box" {
 			app.listView.cursor = i
 		}
 	}
 	app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
-	app.herdrHostView.inputs[1].SetValue("GPU Edited")
+	app.herdrHostView.inputs[hostLabel].SetValue("GPU Edited")
+	focusHostAction(app, hostSave)
 	app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if len(saved) != 2 || saved[1][2].Label != "GPU Edited" {
 		t.Fatalf("edit saved=%#v", saved)
 	}
 
 	for i, item := range app.listView.items {
-		if item.Type == "herdr_endpoint" && item.Endpoint != nil && item.Endpoint.ID == "gpu" {
+		if item.Type == "herdr_endpoint" && item.Endpoint != nil && item.Endpoint.ID == "gpu-box" {
 			app.listView.cursor = i
 		}
 	}

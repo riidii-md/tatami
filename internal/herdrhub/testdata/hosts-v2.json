@@ -1,0 +1,1 @@
+{"version":2,"hosts":[{"id":"box","label":"Box","target":"ssh://u@box:2222","connectivity_revision":"0123456789abcdef0123456789abcdef","connection":{"mode":"explicit","hostname":"box","username":"u","port":2222,"auth":"config-agent"}}]}

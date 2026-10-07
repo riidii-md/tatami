@@ -66,6 +66,7 @@ func TestNewTabProcessStartsRemoteSession(t *testing.T) {
 
 	wantArgs := []string{
 		"/usr/bin/ssh",
+		"-a",
 		"-i", "/tmp/my key",
 		"-t",
 		"--",
@@ -98,6 +99,7 @@ func TestNewTabProcessStartsRemoteSessionThroughJumpRoute(t *testing.T) {
 	}
 	want := []string{
 		"/usr/bin/ssh",
+		"-a",
 		"-J", "user@bastion,relay",
 		"-t", "--", "macmini.internal",
 		"cd '/srv/project' && exec ${SHELL:-/bin/sh}",
@@ -341,7 +343,7 @@ func TestHandleResultAttachesHerdrSessionThroughValidatedJumpRoute(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"-J", "user@bastion", "-t", "--", "macmini", "herdr", "--session", "agents"}
+	_, want, _ := herdrhub.SSHAttachArgs(herdrhub.Endpoint{ID: "macmini", Label: "Mac Mini", Target: "macmini", Via: []string{"user@bastion"}}, "agents")
 	if gotName != "ssh" || !reflect.DeepEqual(gotArgs, want) {
 		t.Fatalf("interactive attach = %s %#v; want ssh %#v", gotName, gotArgs, want)
 	}
@@ -368,7 +370,7 @@ func TestHandleResultUsesSSHForSelectedRemoteSessionInsideHerdr(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"-t", "--", "oles@bmo.local", "herdr", "--session", "coa_bugs"}
+	_, want, _ := herdrhub.SSHAttachArgs(herdrhub.Endpoint{ID: "macmini", Label: "Mac Mini", Target: "oles@bmo.local"}, "coa_bugs")
 	if gotName != "ssh" || !reflect.DeepEqual(gotArgs, want) {
 		t.Fatalf("inside-Herdr attach = %s %#v; want ssh %#v", gotName, gotArgs, want)
 	}

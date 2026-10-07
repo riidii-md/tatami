@@ -207,6 +207,12 @@ Herdr sessions, and saved downstream hosts. Downstream selections use OpenSSH
 ProxyJump, so a laptop can navigate through a bastion to another machine
 without forwarding its SSH agent. See [Federated Tatami Hub](docs/herdr-hub.md).
 
+Saved SSH hosts have labeled alias/hostname/username/port, group/tag and
+authentication fields. Save and interactive Test are separate actions.
+OpenSSH owns password, passphrase and security-key prompts; passwords and key
+contents are never stored. Remote discovery performs executable lookup and
+legacy Herdr fallback inside one SSH connection.
+
 ### Git Worktrees
 Open worktrees in new tabs for git-enabled workspaces. When selecting a workspace that is a git repository:
 

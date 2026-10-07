@@ -454,8 +454,12 @@ func run(newTabMode, mobileMode bool) error {
 	appOptions = append(appOptions, tui.WithHerdrHubRefresh(func(ctx context.Context, endpoints []herdrhub.Endpoint, previous herdrhub.Cache) []herdrhub.Snapshot {
 		return herdrhub.RefreshWithTimeout(ctx, herdrHubClient, endpoints, previous, 1, 5*time.Second)
 	}, saveHubCache))
-	appOptions = append(appOptions, tui.WithHerdrHubEndpointSaver(func(endpoints []herdrhub.Endpoint) error {
-		return herdrhub.NewStore(paths.HerdrHostsFile).Save(endpoints)
+	appOptions = append(appOptions, tui.WithHerdrHubProfileSaver(func(profiles []herdrhub.SavedHost) ([]herdrhub.SavedHost, error) {
+		store := herdrhub.NewStore(paths.HerdrHostsFile)
+		if err := store.SaveProfiles(profiles); err != nil {
+			return nil, err
+		}
+		return store.ListProfiles()
 	}))
 	appOptions = append(appOptions, tui.WithHerdrHubAgentQuery(func(ctx context.Context, endpoint herdrhub.Endpoint, session string) ([]herdrhub.Agent, error) {
 		return herdrHubClient.QueryAgents(ctx, endpoint, session)
@@ -513,6 +517,7 @@ func loadHerdrHub(paths *config.Paths) ([]herdrhub.Endpoint, herdrhub.Cache, boo
 	if err != nil {
 		return endpoints, herdrhub.Cache{}, false, nil
 	}
+	cache.Snapshots = herdrhub.ReconcileSnapshots(endpoints, cache.Snapshots, true)
 	return endpoints, cache, true, nil
 }
 
@@ -734,10 +739,6 @@ type processSpec struct {
 	dir  string
 }
 
-func quoteShellArg(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
-}
-
 func newTabProcess(ws *workspace.Workspace, shellPath string, lookPath func(string) (string, error)) (processSpec, error) {
 	if ws.IsRemote() {
 		sshPath, err := lookPath("ssh")
@@ -745,23 +746,15 @@ func newTabProcess(ws *workspace.Workspace, shellPath string, lookPath func(stri
 			return processSpec{}, fmt.Errorf("ssh not found: %w", err)
 		}
 
-		remotePath := ws.Remote.Path
-		if remotePath == "" {
-			remotePath = ws.Path
+		remote := *ws.Remote
+		if remote.Path == "" {
+			remote.Path = ws.Path
 		}
-		remoteCommand := "exec ${SHELL:-/bin/sh}"
-		if remotePath != "" {
-			remoteCommand = "cd " + quoteShellArg(remotePath) + " && " + remoteCommand
+		command, err := shell.BuildRemoteSSH(&remote, "")
+		if err != nil {
+			return processSpec{}, err
 		}
-
-		args := []string{sshPath}
-		if ws.Remote.Key != "" {
-			args = append(args, "-i", ws.Remote.Key)
-		}
-		if len(ws.Remote.Jump) > 0 {
-			args = append(args, "-J", strings.Join(ws.Remote.Jump, ","))
-		}
-		args = append(args, "-t", "--", ws.Remote.Host, remoteCommand)
+		args := append([]string{sshPath}, command.Args...)
 		return processSpec{path: sshPath, args: args}, nil
 	}
 
@@ -864,6 +857,16 @@ func herdrSessionName(result *tui.Result, target *workspace.Workspace) string {
 }
 
 func handleResult(result *tui.Result, newTabMode bool) error {
+	if resultHubOrigin(result) != nil {
+		paths, err := config.GetPaths()
+		if err != nil {
+			return err
+		}
+		result, err = resolveHubResult(paths, result)
+		if err != nil {
+			return err
+		}
+	}
 	// Handle session attachment first (doesn't need workspace)
 	if result.Action == tui.ActionAttachSession {
 		if result.SessionName == "" {
@@ -910,6 +913,16 @@ func handleResult(result *tui.Result, newTabMode bool) error {
 		var name string
 		var args []string
 		var err error
+		if result.HubOrigin != nil {
+			paths, pathErr := config.GetPaths()
+			if pathErr != nil {
+				return pathErr
+			}
+			endpoint, err = herdrhub.ResolveOrigin(herdrhub.NewStore(paths.HerdrHostsFile), result.HubOrigin)
+			if err != nil {
+				return err
+			}
+		}
 		if os.Getenv("HERDR_ENV") == "1" {
 			name, args, err = herdrhub.SSHAttachArgs(endpoint, result.SessionName)
 		} else {
@@ -955,7 +968,10 @@ func handleResult(result *tui.Result, newTabMode bool) error {
 	switch result.Action {
 	case tui.ActionCD:
 		if isRemote {
-			sshCmd := shell.BuildRemoteSSHCommand(ws.Remote, "")
+			sshCmd, err := shell.BuildRemoteSSHCommand(ws.Remote, "")
+			if err != nil {
+				return err
+			}
 			if zellij.IsInsideSession() {
 				return zellij.WriteChars(sshCmd + "\n")
 			}

@@ -107,7 +107,7 @@ func TestHubAuthenticationNeededShowsPasswordlessSSHSetup(t *testing.T) {
 		"Background refresh needs non-interactive SSH",
 		"ssh-add ~/.ssh/<private-key>",
 		"ssh-copy-id oles@bmo.local",
-		"ssh -o BatchMode=yes oles@bmo.local true",
+		"'ssh' '-a' '-o' 'BatchMode=yes' '--' 'oles@bmo.local' 'true'",
 		"[enter]open/authenticate",
 	} {
 		if !strings.Contains(got, want) {
@@ -129,7 +129,7 @@ func TestHubAuthenticationGuidanceIncludesJumpRoute(t *testing.T) {
 	got := hubAuthenticationGuidance(endpoint, herdrhub.Snapshot{State: herdrhub.StateAuthenticationNeeded})
 	for _, want := range []string{
 		"ssh-copy-id -o ProxyJump=user@bastion,relay macmini",
-		"ssh -o BatchMode=yes -J user@bastion,relay macmini true",
+		"'ssh' '-a' '-o' 'BatchMode=yes' '-J' 'user@bastion,relay' '--' 'macmini' 'true'",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("route guidance missing %q:\n%s", want, got)

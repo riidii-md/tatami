@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/OleksandrBesan/tatami/internal/herdrhub"
 	appsearch "github.com/OleksandrBesan/tatami/internal/search"
 	"github.com/OleksandrBesan/tatami/internal/shell"
+	"github.com/OleksandrBesan/tatami/internal/sshconn"
 	"github.com/OleksandrBesan/tatami/internal/systemusage"
 	"github.com/OleksandrBesan/tatami/internal/workspace"
 	tea "github.com/charmbracelet/bubbletea"
@@ -41,6 +43,7 @@ const (
 
 // Result represents the outcome of the TUI session
 type Result struct {
+	HubOrigin   *sshconn.Origin
 	Action      Action
 	Workspace   *workspace.Workspace
 	Template    *workspace.Template
@@ -81,6 +84,7 @@ type AppOption func(*App)
 type herdrHubRefresher func(context.Context, []herdrhub.Endpoint, herdrhub.Cache) []herdrhub.Snapshot
 type herdrHubCacheSaver func(herdrhub.Cache) error
 type herdrHubEndpointSaver func([]herdrhub.Endpoint) error
+type herdrHubProfileSaver func([]herdrhub.SavedHost) ([]herdrhub.SavedHost, error)
 type herdrHubAgentQuery func(context.Context, herdrhub.Endpoint, string) ([]herdrhub.Agent, error)
 type herdrHubInteractiveInventory func(context.Context, herdrhub.Endpoint, io.Reader, io.Writer) (herdrhub.Snapshot, error)
 type repositoryIdentityResolver func(context.Context, string) (git.RepositoryIdentity, error)
@@ -101,6 +105,9 @@ func WithHerdrHubRefresh(refresh herdrHubRefresher, save herdrHubCacheSaver) App
 }
 func WithHerdrHubEndpointSaver(save herdrHubEndpointSaver) AppOption {
 	return func(a *App) { a.herdrHubEndpointSaver = save }
+}
+func WithHerdrHubProfileSaver(save herdrHubProfileSaver) AppOption {
+	return func(a *App) { a.herdrHubProfileSaver = save }
 }
 func WithHerdrHubAgentQuery(query herdrHubAgentQuery) AppOption {
 	return func(a *App) { a.herdrHubAgentQuery = query }
@@ -195,7 +202,10 @@ type App struct {
 	herdrHubCacheSaver           herdrHubCacheSaver
 	herdrHubGeneration           uint64
 	herdrHubCancel               context.CancelFunc
+	herdrHubInteractiveCancel    context.CancelFunc
+	hubOperationGenerations      map[string]uint64
 	herdrHubEndpointSaver        herdrHubEndpointSaver
+	herdrHubProfileSaver         herdrHubProfileSaver
 	herdrHostView                *HerdrHostView
 	herdrHostEditingID           string
 	herdrHubAgentQuery           herdrHubAgentQuery
@@ -300,6 +310,7 @@ func (a *App) scheduleRepositoryIdentities() tea.Cmd {
 }
 
 type herdrHubAgentsResultMsg struct {
+	Endpoint            herdrhub.Endpoint
 	EndpointID, Session string
 	Generation          uint64
 	Agents              []herdrhub.Agent
@@ -324,7 +335,7 @@ func (a *App) scheduleSelectedHubAgents() tea.Cmd {
 	a.listView.SetHerdrHubAgentsLoading(endpoint.Key(), session)
 	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
 		agents, err := a.herdrHubAgentQuery(ctx, endpoint, session)
-		return herdrHubAgentsResultMsg{EndpointID: endpoint.Key(), Session: session, Generation: generation, Agents: agents, Err: err}
+		return herdrHubAgentsResultMsg{Endpoint: endpoint, EndpointID: endpoint.Key(), Session: session, Generation: generation, Agents: agents, Err: err}
 	})
 }
 
@@ -339,17 +350,21 @@ func (a *App) remoteHubEndpoints() []herdrhub.Endpoint {
 }
 
 type herdrHubRefreshResultMsg struct {
-	Generation uint64
-	Snapshots  []herdrhub.Snapshot
+	Endpoint            herdrhub.Endpoint
+	OperationGeneration uint64
+	Generation          uint64
+	Snapshots           []herdrhub.Snapshot
 }
 
 type herdrHubInteractiveInventoryMsg struct {
-	Endpoint herdrhub.Endpoint
-	Snapshot herdrhub.Snapshot
-	Err      error
+	OperationGeneration uint64
+	Endpoint            herdrhub.Endpoint
+	Snapshot            herdrhub.Snapshot
+	Err                 error
 }
 
 type herdrHubInteractiveInventoryCommand struct {
+	ctx      context.Context
 	endpoint herdrhub.Endpoint
 	query    herdrHubInteractiveInventory
 	stdin    io.Reader
@@ -361,7 +376,11 @@ func (c *herdrHubInteractiveInventoryCommand) SetStdin(stdin io.Reader)   { c.st
 func (c *herdrHubInteractiveInventoryCommand) SetStdout(io.Writer)        {}
 func (c *herdrHubInteractiveInventoryCommand) SetStderr(stderr io.Writer) { c.stderr = stderr }
 func (c *herdrHubInteractiveInventoryCommand) Run() error {
-	snapshot, err := c.query(context.Background(), c.endpoint, c.stdin, c.stderr)
+	ctx := c.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	snapshot, err := c.query(ctx, c.endpoint, c.stdin, c.stderr)
 	c.snapshot = snapshot
 	return err
 }
@@ -371,9 +390,16 @@ func (a *App) scheduleInteractiveHerdrInventory(endpoint herdrhub.Endpoint) tea.
 		a.err = fmt.Errorf("interactive remote Tatami discovery is unavailable")
 		return nil
 	}
-	command := &herdrHubInteractiveInventoryCommand{endpoint: endpoint, query: a.herdrHubInteractiveInventory}
+	if a.herdrHubInteractiveCancel != nil {
+		a.herdrHubInteractiveCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.herdrHubInteractiveCancel = cancel
+	generation := a.nextHubOperation(endpoint)
+	command := &herdrHubInteractiveInventoryCommand{ctx: ctx, endpoint: endpoint, query: a.herdrHubInteractiveInventory}
 	return tea.Exec(command, func(err error) tea.Msg {
-		return herdrHubInteractiveInventoryMsg{Endpoint: endpoint, Snapshot: command.snapshot, Err: err}
+		cancel()
+		return herdrHubInteractiveInventoryMsg{Endpoint: endpoint, OperationGeneration: generation, Snapshot: command.snapshot, Err: err}
 	})
 }
 
@@ -394,6 +420,7 @@ func (a *App) scheduleHubRefresh(endpoints []herdrhub.Endpoint) tea.Cmd {
 	commands := make([]tea.Cmd, 0, len(endpointCopy))
 	for _, endpoint := range endpointCopy {
 		endpoint := endpoint
+		operation := a.nextHubOperation(endpoint)
 		commands = append(commands, func() tea.Msg {
 			select {
 			case semaphore <- struct{}{}:
@@ -402,6 +429,7 @@ func (a *App) scheduleHubRefresh(endpoints []herdrhub.Endpoint) tea.Cmd {
 				return herdrHubRefreshResultMsg{Generation: generation}
 			}
 			return herdrHubRefreshResultMsg{
+				Endpoint: endpoint, OperationGeneration: operation,
 				Generation: generation,
 				Snapshots:  a.herdrHubRefresher(ctx, []herdrhub.Endpoint{endpoint}, previous),
 			}
@@ -418,22 +446,48 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.width = msg.Width
 		a.height = msg.Height
 		a.listView.SetSize(msg.Width, msg.Height)
+		if a.herdrHostView != nil {
+			a.herdrHostView.SetSize(msg.Width, msg.Height)
+		}
 		a.setSearchHeights(msg.Height)
 		if resized {
 			return a, tea.ClearScreen
+		}
+		return a, nil
+	case herdrHostTestResultMsg:
+		if a.herdrHostView != msg.View || a.currentView != ViewHerdrHost {
+			return a, nil
+		}
+		v := a.herdrHostView
+		if msg.Err != nil {
+			v.err = errors.New("SSH Test failed; edit this draft and retry.")
+			var query *herdrhub.QueryError
+			if errors.As(msg.Err, &query) {
+				v.err = query
+			}
+			v.notice = ""
+			v.testSnapshot = nil
+			v.testedProfile = nil
+		} else {
+			v.err = nil
+			v.notice = "Test succeeded (Tatami inventory). Save to keep this host."
+			if msg.Snapshot.Legacy {
+				v.notice = "Test succeeded (legacy Herdr sessions). Save to keep this host."
+			}
+			v.testSnapshot = &msg.Snapshot
+			v.testedProfile = &msg.Profile
 		}
 		return a, nil
 	case herdrHubRefreshResultMsg:
 		if msg.Generation != a.herdrHubGeneration {
 			return a, nil
 		}
-		a.hubSnapshots = mergeHubSnapshots(a.hubEndpoints, a.hubSnapshots, msg.Snapshots)
-		a.listView.SetHerdrHubSnapshots(a.hubEndpoints, a.hubSnapshots)
-		if a.herdrHubCacheSaver != nil {
-			if err := a.herdrHubCacheSaver(herdrhub.Cache{Snapshots: a.hubSnapshots}); err != nil {
-				a.err = err
-			}
+		if msg.Endpoint.ID != "" && (!a.currentHubEndpoint(msg.Endpoint) || msg.OperationGeneration != a.hubOperationGenerations[msg.Endpoint.Key()]) {
+			return a, nil
 		}
+		a.applyHubUpdates(msg.Snapshots)
+		a.listView.SetHerdrHubSnapshots(a.hubEndpoints, a.hubSnapshots)
+		a.saveHubCacheSafely()
 		return a, nil
 	case repositoryIdentitiesMsg:
 		if msg.Generation != a.repositoryGeneration {
@@ -450,6 +504,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Generation != a.herdrHubAgentGeneration {
 			return a, nil
 		}
+		if msg.Endpoint.ID != "" && !a.currentHubEndpoint(msg.Endpoint) {
+			return a, nil
+		}
 		s := a.listView.Selected()
 		if s == nil || s.Endpoint == nil || s.Herdr == nil || s.Endpoint.Key() != msg.EndpointID || s.Herdr.Name != msg.Session {
 			return a, nil
@@ -461,18 +518,30 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	case herdrHubInteractiveInventoryMsg:
-		if msg.Err != nil {
-			a.err = msg.Err
+		if !a.currentHubEndpoint(msg.Endpoint) || msg.OperationGeneration != a.hubOperationGenerations[msg.Endpoint.Key()] {
 			return a, nil
 		}
-		a.hubSnapshots = mergeHubSnapshots(a.hubEndpoints, a.hubSnapshots, []herdrhub.Snapshot{msg.Snapshot})
+		if msg.Err != nil {
+			failure := herdrhub.StampSnapshot(msg.Endpoint, herdrhub.Snapshot{State: herdrhub.StateOffline, Error: "Remote discovery failed; edit this host or retry Test."})
+			var query *herdrhub.QueryError
+			if errors.As(msg.Err, &query) {
+				failure.State, failure.Failure, failure.Error = query.State(), query.Kind, query.Error()
+			}
+			for _, old := range a.hubSnapshots {
+				if old.EndpointID == failure.EndpointID && (!old.LastSuccess.IsZero()) {
+					failure.Host, failure.Sessions, failure.Workspaces, failure.Hosts, failure.LastSuccess = old.Host, old.Sessions, old.Workspaces, old.Hosts, old.LastSuccess
+					failure.State = herdrhub.StateStale
+				}
+			}
+			a.applyHubUpdates([]herdrhub.Snapshot{failure})
+			a.listView.SetHerdrHubSnapshots(a.hubEndpoints, a.hubSnapshots)
+			a.currentView = ViewList
+			return a, nil
+		}
+		a.applyHubUpdates([]herdrhub.Snapshot{msg.Snapshot})
 		a.listView.SetHerdrHubSnapshots(a.hubEndpoints, a.hubSnapshots)
 		a.listView.ExpandHerdrEndpoint(msg.Endpoint.Key())
-		if a.herdrHubCacheSaver != nil {
-			if err := a.herdrHubCacheSaver(herdrhub.Cache{Snapshots: a.hubSnapshots}); err != nil {
-				a.err = err
-			}
-		}
+		a.saveHubCacheSafely()
 		a.currentView = ViewList
 		return a, nil
 
@@ -689,37 +758,21 @@ func (a *App) setSearchHeights(height int) {
 }
 
 func mergeHubSnapshots(endpoints []herdrhub.Endpoint, current, updates []herdrhub.Snapshot) []herdrhub.Snapshot {
-	byID := make(map[string]herdrhub.Snapshot, len(current)+len(updates))
-	for _, snapshot := range current {
-		byID[snapshot.EndpointID] = snapshot
-	}
-	for _, snapshot := range updates {
-		byID[snapshot.EndpointID] = snapshot
-	}
-	merged := make([]herdrhub.Snapshot, 0, len(byID))
-	added := make(map[string]bool, len(byID))
-	for _, endpoint := range endpoints {
-		if endpoint.ID == herdrhub.LocalEndpointID {
-			continue
-		}
-		if snapshot, ok := byID[endpoint.Key()]; ok {
-			merged = append(merged, snapshot)
-			added[snapshot.EndpointID] = true
+	byID := make(map[string]herdrhub.Snapshot)
+	order := []string{}
+	for _, snapshots := range [][]herdrhub.Snapshot{current, updates} {
+		for _, s := range snapshots {
+			if _, ok := byID[s.EndpointID]; !ok {
+				order = append(order, s.EndpointID)
+			}
+			byID[s.EndpointID] = s
 		}
 	}
-	for _, snapshot := range current {
-		if !added[snapshot.EndpointID] {
-			merged = append(merged, byID[snapshot.EndpointID])
-			added[snapshot.EndpointID] = true
-		}
+	combined := make([]herdrhub.Snapshot, 0, len(order))
+	for _, id := range order {
+		combined = append(combined, byID[id])
 	}
-	for _, snapshot := range updates {
-		if !added[snapshot.EndpointID] {
-			merged = append(merged, snapshot)
-			added[snapshot.EndpointID] = true
-		}
-	}
-	return merged
+	return herdrhub.ReconcileSnapshots(endpoints, combined, false)
 }
 
 func (a *App) selectedHerdrUsageKey() string {
@@ -910,6 +963,7 @@ func (a *App) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	case "a":
 		a.herdrHostView = NewHerdrHostView(herdrhub.Endpoint{})
+		a.herdrHostView.SetSize(a.width, a.height)
 		a.applyMobileMode(a.herdrHostView)
 		a.herdrHostEditingID = ""
 		a.currentView = ViewHerdrHost
@@ -923,6 +977,7 @@ func (a *App) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if item != nil && item.Type == "herdr_endpoint" && item.Endpoint != nil && item.Endpoint.ID != herdrhub.LocalEndpointID && item.Endpoint.NodeID == "" {
 			a.herdrHostView = NewHerdrHostView(*item.Endpoint)
+			a.herdrHostView.SetSize(a.width, a.height)
 			a.applyMobileMode(a.herdrHostView)
 			a.herdrHostEditingID = item.Endpoint.ID
 			a.currentView = ViewHerdrHost
@@ -1031,6 +1086,7 @@ func (a *App) activateListSelection() (tea.Model, tea.Cmd) {
 			SessionName: item.Herdr.Name,
 		}
 		if item.Endpoint != nil {
+			a.result.HubOrigin = herdrhub.EndpointOrigin(*item.Endpoint)
 			a.result.HerdrEndpointID = item.Endpoint.Key()
 			a.result.HerdrTarget = item.Endpoint.Target
 			a.result.HerdrVia = append([]string(nil), item.Endpoint.Via...)
@@ -1038,88 +1094,6 @@ func (a *App) activateListSelection() (tea.Model, tea.Cmd) {
 		return a, tea.Quit
 	}
 	return a, nil
-}
-
-func (a *App) updateHerdrHost(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if a.herdrHostView == nil {
-		a.currentView = ViewList
-		return a, nil
-	}
-	switch msg.String() {
-	case "esc":
-		a.currentView = ViewList
-		return a, nil
-	case "enter":
-		endpoint := a.herdrHostView.Endpoint()
-		if err := herdrhub.ValidateEndpoint(endpoint); err != nil {
-			a.herdrHostView.err = err
-			return a, nil
-		}
-		out := make([]herdrhub.Endpoint, 0, len(a.hubEndpoints)+1)
-		replaced := false
-		for _, old := range a.hubEndpoints {
-			if old.ID == a.herdrHostEditingID {
-				out = append(out, endpoint)
-				replaced = true
-			} else {
-				out = append(out, old)
-			}
-		}
-		if !replaced {
-			out = append(out, endpoint)
-		}
-		if a.herdrHubEndpointSaver != nil {
-			if err := a.herdrHubEndpointSaver(out); err != nil {
-				a.herdrHostView.err = err
-				return a, nil
-			}
-		}
-		a.hubEndpoints = out
-		a.listView.SetHerdrHubSnapshots(out, a.hubSnapshots)
-		a.currentView = ViewList
-		return a, a.scheduleHubRefresh([]herdrhub.Endpoint{endpoint})
-	default:
-		return a, a.herdrHostView.Update(msg)
-	}
-}
-
-func (a *App) updateHerdrHostDelete(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc", "q":
-		a.herdrHostDeleteView = nil
-		a.currentView = ViewList
-		return a, nil
-	case "enter":
-		if a.herdrHostDeleteView == nil {
-			a.err = fmt.Errorf("no Herdr host selected for deletion")
-			return a, nil
-		}
-		if !a.herdrHostDeleteView.Confirmed() {
-			a.herdrHostDeleteView = nil
-			a.currentView = ViewList
-			return a, nil
-		}
-		id := a.herdrHostDeleteView.endpoint.ID
-		out := make([]herdrhub.Endpoint, 0, len(a.hubEndpoints))
-		for _, endpoint := range a.hubEndpoints {
-			if endpoint.ID != id {
-				out = append(out, endpoint)
-			}
-		}
-		if a.herdrHubEndpointSaver != nil {
-			if err := a.herdrHubEndpointSaver(out); err != nil {
-				a.err = err
-				return a, nil
-			}
-		}
-		a.herdrHostDeleteView = nil
-		a.hubEndpoints = out
-		a.listView.SetHerdrHubSnapshots(out, a.hubSnapshots)
-		a.currentView = ViewList
-		return a, nil
-	default:
-		return a, a.herdrHostDeleteView.Update(msg)
-	}
 }
 
 func (a *App) updateCreate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1200,6 +1174,9 @@ func (a *App) updateActions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (a *App) activateActionSelection() (tea.Model, tea.Cmd) {
 	action := a.actionsView.Selected()
 	ws := a.actionsView.Workspace()
+	if !a.checkHubWorkspace(ws) {
+		return a, nil
+	}
 	if action == ActionWithTemplate {
 		a.templateView = NewTemplateView()
 		a.applyMobileMode(a.templateView)
@@ -1213,7 +1190,7 @@ func (a *App) activateActionSelection() (tea.Model, tea.Cmd) {
 		a.currentView = ViewWorktree
 		return a, nil
 	}
-	result := &Result{Action: action, Workspace: ws}
+	result := &Result{Action: action, Workspace: safeResultWorkspace(ws)}
 	if ws.Layout.Type == workspace.LayoutHerdr {
 		a.beginHerdrOpen(result, ViewActions)
 		return a, nil
@@ -1278,10 +1255,13 @@ func (a *App) updateTemplates(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case a.previousView == ViewWorktreeActions:
 		// If came from worktree actions view, execute worktree with template
 		ws := a.worktreeActionView.Workspace()
+		if !a.checkHubWorkspace(ws) {
+			return a, nil
+		}
 		wt := a.worktreeActionView.Worktree()
 		result := &Result{
 			Action:    ActionWorktree,
-			Workspace: ws,
+			Workspace: safeResultWorkspace(ws),
 			Worktree:  wt,
 			Template:  tmpl,
 		}
@@ -1295,9 +1275,12 @@ func (a *App) updateTemplates(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	default:
 		// If came from actions view, execute with template
 		ws := a.actionsView.Workspace()
+		if !a.checkHubWorkspace(ws) {
+			return a, nil
+		}
 		result := &Result{
 			Action:    ActionWithTemplate,
-			Workspace: ws,
+			Workspace: safeResultWorkspace(ws),
 			Template:  tmpl,
 		}
 		if ws.Layout.Type == workspace.LayoutHerdr {
@@ -1327,10 +1310,13 @@ func (a *App) updateWorktree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Check if a worktree was selected - show worktree actions
 	if wt := a.worktreeView.Selected(); wt != nil {
 		ws := a.actionsView.Workspace()
+		if !a.checkHubWorkspace(ws) {
+			return a, nil
+		}
 		if ws.Layout.Type == workspace.LayoutHerdr {
 			a.beginHerdrOpen(&Result{
 				Action:    ActionWorktree,
-				Workspace: ws,
+				Workspace: safeResultWorkspace(ws),
 				Worktree:  wt,
 				Template:  &workspace.Template{},
 			}, ViewWorktree)
@@ -1339,7 +1325,7 @@ func (a *App) updateWorktree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if a.newTabMode {
 			a.result = &Result{
 				Action:    ActionWorktree,
-				Workspace: ws,
+				Workspace: safeResultWorkspace(ws),
 				Worktree:  wt,
 				Template:  &workspace.Template{},
 			}
@@ -1561,6 +1547,9 @@ func (a *App) updateWorktreeActions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (a *App) activateWorktreeActionSelection() (tea.Model, tea.Cmd) {
 	action := a.worktreeActionView.Selected()
 	ws := a.worktreeActionView.Workspace()
+	if !a.checkHubWorkspace(ws) {
+		return a, nil
+	}
 	wt := a.worktreeActionView.Worktree()
 	switch action {
 	case WorktreeActionWithTemplate:
@@ -1570,10 +1559,10 @@ func (a *App) activateWorktreeActionSelection() (tea.Model, tea.Cmd) {
 		a.currentView = ViewTemplates
 		return a, nil
 	case WorktreeActionWithLayout:
-		a.result = &Result{Action: ActionWorktree, Workspace: ws, Worktree: wt}
+		a.result = &Result{Action: ActionWorktree, Workspace: safeResultWorkspace(ws), Worktree: wt}
 		return a, tea.Quit
 	case WorktreeActionPlain:
-		a.result = &Result{Action: ActionWorktree, Workspace: ws, Worktree: wt, Template: &workspace.Template{}}
+		a.result = &Result{Action: ActionWorktree, Workspace: safeResultWorkspace(ws), Worktree: wt, Template: &workspace.Template{}}
 		return a, tea.Quit
 	default:
 		return a, nil

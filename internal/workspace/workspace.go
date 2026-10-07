@@ -1,5 +1,7 @@
 package workspace
 
+import "github.com/OleksandrBesan/tatami/internal/sshconn"
+
 // LayoutType represents the multiplexer type
 type LayoutType string
 
@@ -25,10 +27,12 @@ type Layout struct {
 
 // Remote represents remote connection settings
 type Remote struct {
-	Host string   `json:"host"`           // user@hostname or hostname
-	Path string   `json:"path"`           // Remote path
-	Key  string   `json:"key,omitempty"`  // SSH key path (optional)
-	Jump []string `json:"jump,omitempty"` // Optional local OpenSSH ProxyJump route.
+	Source     *sshconn.Origin     `json:"-"`
+	Connection *sshconn.Connection `json:"-"`
+	Host       string              `json:"host"`           // user@hostname or hostname
+	Path       string              `json:"path"`           // Remote path
+	Key        string              `json:"key,omitempty"`  // SSH key path (optional)
+	Jump       []string            `json:"jump,omitempty"` // Optional local OpenSSH ProxyJump route.
 }
 
 // Workspace represents a terminal workspace

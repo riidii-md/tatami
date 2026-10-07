@@ -92,7 +92,10 @@ func (t *TmuxRunner) NewWindowSSH(host, key, remotePath, name string) error {
 
 // NewWindowSSHRemote opens a new window using the complete remote route.
 func (t *TmuxRunner) NewWindowSSHRemote(remote *workspace.Remote, name string) error {
-	sshCmd := BuildRemoteSSHCommand(remote, "")
+	sshCmd, err := BuildRemoteSSHCommand(remote, "")
+	if err != nil {
+		return err
+	}
 
 	args := []string{"new-window"}
 	if name != "" {
@@ -113,7 +116,10 @@ func (t *TmuxRunner) NewPaneSSH(host, key, remotePath, direction string) error {
 
 // NewPaneSSHRemote opens a new pane using the complete remote route.
 func (t *TmuxRunner) NewPaneSSHRemote(remote *workspace.Remote, direction string) error {
-	sshCmd := BuildRemoteSSHCommand(remote, "")
+	sshCmd, err := BuildRemoteSSHCommand(remote, "")
+	if err != nil {
+		return err
+	}
 
 	args := []string{"split-window"}
 	switch direction {
@@ -137,7 +143,10 @@ func (t *TmuxRunner) RunPaneSSH(host, key, remotePath, direction, command string
 
 // RunPaneSSHRemote opens a new pane through the complete route and runs a command.
 func (t *TmuxRunner) RunPaneSSHRemote(remote *workspace.Remote, direction, command string) error {
-	sshCmd := BuildRemoteSSHCommand(remote, command)
+	sshCmd, err := BuildRemoteSSHCommand(remote, command)
+	if err != nil {
+		return err
+	}
 
 	args := []string{"split-window"}
 	switch direction {
